@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Editor
+.vscode/
+
+# Build artifacts
+*.so
+
+# Data dumps / large raw datasets
+merged/
+merged_d1/
+
+# Generated results
+Template/*.csv
