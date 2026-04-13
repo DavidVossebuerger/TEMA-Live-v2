@@ -13,6 +13,3 @@ __pycache__/
 # Data dumps / large raw datasets
 merged/
 merged_d1/
-
-# Generated results
-Template/*.csv
