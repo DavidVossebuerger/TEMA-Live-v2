@@ -63,7 +63,7 @@ class BacktestConfig:
     # Annualized target vol for ML position scalar (e.g., 0.10 = 10%)
     ml_position_scalar_target_vol: float = 0.10
     # Safety cap for ML scalar to avoid excessive leverage
-    ml_position_scalar_max: float = 20.0
+    ml_position_scalar_max: float = 50.0
 
     # Vol-target scaling (train-based)
     vol_target_enabled: bool = True
@@ -74,6 +74,8 @@ class BacktestConfig:
     # Accepted values: "ml" (use ML-filtered train returns) or "bl" (use BL train returns).
     # Default changed to "bl" so global vol-target remains BL-referenced while ML gets separate scalar
     vol_target_reference: str = "bl"
+    # Whether to apply the global vol-target scalar to ML-filtered returns. Default: False => ML has its own scalar
+    vol_target_apply_to_ml: bool = False
 
     ml_grid_search_enabled: bool = True
     ml_grid_rf_n_estimators: Tuple[int, ...] = (200, 400)
@@ -1011,11 +1013,23 @@ def compute_and_apply_vol_target(
         scalar = float(np.clip(unclipped_scalar, cfg.vol_target_min_leverage, cfg.vol_target_max_leverage))
         clipped = not np.isclose(unclipped_scalar, scalar)
 
-    # Apply scalar to both train and test portfolio returns and ML filtered returns
+    # Apply scalar to BL train and test portfolio returns always
     scaled_train = train_port_rets * scalar
     scaled_test = test_port_rets * scalar
-    scaled_ml_train = ml_train_rets * scalar
-    scaled_ml_test = ml_test_rets * scalar
+
+    # Decide whether to apply the global vol-target scalar to ML-filtered returns
+    apply_to_ml = bool(getattr(cfg, "vol_target_apply_to_ml", False))
+    if ml_train_rets is not None and not ml_train_rets.empty:
+        if apply_to_ml:
+            scaled_ml_train = ml_train_rets * scalar
+            scaled_ml_test = ml_test_rets * scalar
+        else:
+            # Keep ML returns as-is (ML-specific scalar was applied earlier)
+            scaled_ml_train = ml_train_rets
+            scaled_ml_test = ml_test_rets
+    else:
+        scaled_ml_train = ml_train_rets
+        scaled_ml_test = ml_test_rets
 
     diag = {
         "enabled": True,
@@ -1028,6 +1042,7 @@ def compute_and_apply_vol_target(
         "min_leverage": float(cfg.vol_target_min_leverage),
         "max_leverage": float(cfg.vol_target_max_leverage),
         "clipped": bool(bool(clipped)),
+        "apply_to_ml": bool(apply_to_ml),
     }
 
     return scaled_train, scaled_test, scaled_ml_train, scaled_ml_test, diag
@@ -1065,16 +1080,16 @@ def compute_and_apply_ml_position_scalar(
     if bool(getattr(cfg, "ml_position_scalar_auto", True)):
         # Auto compute scalar from realized train ML volatility
         if train_ml_vol <= 1e-12 or not np.isfinite(train_ml_vol):
-            unclipped_scalar = float(getattr(cfg, "ml_position_scalar_max", 20.0))
-            scalar = float(getattr(cfg, "ml_position_scalar_max", 20.0))
+            unclipped_scalar = float(getattr(cfg, "ml_position_scalar_max", 50.0))
+            scalar = float(getattr(cfg, "ml_position_scalar_max", 50.0))
             clipped = True
         else:
             unclipped_scalar = float(target_vol / train_ml_vol)
-            scalar = float(np.clip(unclipped_scalar, 0.0, getattr(cfg, "ml_position_scalar_max", 20.0)))
+            scalar = float(np.clip(unclipped_scalar, 0.0, getattr(cfg, "ml_position_scalar_max", 50.0)))
             clipped = not np.isclose(unclipped_scalar, scalar)
     else:
         unclipped_scalar = float(getattr(cfg, "ml_position_scalar", 1.0))
-        scalar = float(min(unclipped_scalar, getattr(cfg, "ml_position_scalar_max", 20.0)))
+        scalar = float(min(unclipped_scalar, getattr(cfg, "ml_position_scalar_max", 50.0)))
         clipped = not np.isclose(unclipped_scalar, scalar)
 
     scaled_ml_train = ml_train_rets * scalar
@@ -1087,7 +1102,7 @@ def compute_and_apply_ml_position_scalar(
         "unclipped_scalar": float(unclipped_scalar),
         "train_ml_vol": float(train_ml_vol),
         "target_vol": float(target_vol),
-        "max_scalar": float(getattr(cfg, "ml_position_scalar_max", 20.0)),
+        "max_scalar": float(getattr(cfg, "ml_position_scalar_max", 50.0)),
         "clipped": bool(clipped),
     }
 
