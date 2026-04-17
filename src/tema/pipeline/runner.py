@@ -44,15 +44,48 @@ def _template_split_train_test(close: pd.Series, train_ratio: float) -> tuple[pd
 
 
 def _try_load_template_artifacts(root: str) -> tuple[pd.DataFrame | None, pd.Series | None]:
-    """Best-effort load of precomputed Template artifacts used for strict parity.
+    """Best-effort load of precomputed artifacts used for strict parity.
+
+    Lookup order:
+      1) Repository-local Template directory (if present): Template/...
+      2) src fixtures shipped with the code: src/tema/benchmarks/template_default_universe/...
 
     Returns:
         (asset_strategy_summary_df, bl_weights)
     """
-    template_dir = os.path.join(root, "Template")
-    summary_path = os.path.join(template_dir, "asset_strategy_summary.csv")
-    weights_path = os.path.join(template_dir, "black_litterman_weights.csv")
-    if not (os.path.exists(summary_path) and os.path.exists(weights_path)):
+
+    def _candidate_paths(base_dir: str) -> tuple[str, str]:
+        return (
+            os.path.join(base_dir, "asset_strategy_summary.csv"),
+            os.path.join(base_dir, "black_litterman_weights.csv"),
+        )
+
+    candidates: list[tuple[str, str]] = []
+
+    ignore_template_dir = os.environ.get("TEMA_IGNORE_TEMPLATE_DIR", "0") == "1"
+    if not ignore_template_dir:
+        template_dir = os.path.join(root, "Template")
+        candidates.append(_candidate_paths(template_dir))
+
+    try:
+        import pathlib
+
+        here = pathlib.Path(__file__).resolve()
+        # .../src/tema/pipeline/runner.py -> .../src/tema
+        tema_dir = here.parents[1]
+        fixture_dir = tema_dir / "benchmarks" / "template_default_universe"
+        candidates.append(_candidate_paths(str(fixture_dir)))
+    except Exception:
+        pass
+
+    summary_path = None
+    weights_path = None
+    for s, w in candidates:
+        if os.path.exists(s) and os.path.exists(w):
+            summary_path, weights_path = s, w
+            break
+
+    if not (summary_path and weights_path):
         return None, None
 
     try:
@@ -211,7 +244,7 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
                             "ema1_period": int(combo[0]),
                             "ema2_period": int(combo[1]),
                             "ema3_period": int(combo[2]),
-                            "selection_source": "Template/asset_strategy_summary.csv",
+                            "selection_source": "precomputed_parity_artifacts",
                         }
                     )
 
@@ -234,8 +267,8 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
                 strategy_grid_diagnostics = {
                     "mode": "template_precomputed_artifacts",
                     "selected_assets": int(len(asset_universe)),
-                    "weights_source": "Template/black_litterman_weights.csv",
-                    "combo_source": "Template/asset_strategy_summary.csv",
+                    "weights_source": "precomputed_parity_artifacts",
+                    "combo_source": "precomputed_parity_artifacts",
                     "shift_by": int(cfg.template_grid_shift_by),
                 }
 
@@ -589,7 +622,7 @@ def _portfolio_stage(
                     "sum_weights": float(np.sum(w)),
                     "min_weight": float(np.min(w)) if w.size else 0.0,
                     "max_weight": float(np.max(w)) if w.size else 0.0,
-                    "source": "Template/black_litterman_weights.csv",
+                    "source": "precomputed_parity_artifacts",
                 }
                 use_modular_portfolio = True
 

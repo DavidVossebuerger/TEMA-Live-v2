@@ -63,7 +63,13 @@ python run_pipeline.py \
 - Output:
   - `outputs_outroot_test/parity-template-ml/portfolio_test_returns.csv`
   - `outputs_outroot_test/parity-template-ml/portfolio_test_returns_ml.csv`
-- Erwartung: `portfolio_test_returns_ml.csv` matcht `Template/portfolio_test_returns_ml.csv` innerhalb numerischer Rundungsfehler (typisch max abs diff ~1e-15) und reproduziert Sharpe **~1.218938**.
+- Erwartung: `portfolio_test_returns_ml.csv` matcht die Ground Truth innerhalb numerischer Rundungsfehler (typisch max abs diff ~1e-15) und reproduziert Sharpe **~1.218938**.
+
+**Wichtig (Template kann gelöscht werden):**
+- Für Parity benötigt `src` nur die Artefakte (Weights/Combos + Groundtruth-Return-Serien). Diese liegen jetzt auch unter:
+  - `src/tema/benchmarks/template_default_universe/`
+- Wenn `Template/` existiert, wird es weiterhin bevorzugt genutzt. Wenn nicht, fällt `src` automatisch auf die Fixtures zurück.
+- Debug/Test-Hilfe: `TEMA_IGNORE_TEMPLATE_DIR=1` erzwingt die Fixtures auch wenn `Template/` noch vorhanden ist.
 
 Alternativ als Helper:
 ```bash

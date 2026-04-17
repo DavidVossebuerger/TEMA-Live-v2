@@ -35,7 +35,7 @@ def main() -> int:
     subprocess.run(
         [
             "python",
-            "run_pipeline.py",
+            str(ROOT / "run_pipeline.py"),
             "--run-id",
             str(args.run_id),
             "--out-root",
@@ -44,6 +44,7 @@ def main() -> int:
             "--ml-template-overlay",
         ],
         check=True,
+        cwd=str(ROOT),
     )
 
     out_dir = os.path.join(args.out_root, args.run_id)
@@ -59,17 +60,26 @@ def main() -> int:
     print("SRC baseline:", base_m)
     print("SRC ML      :", ml_m)
 
-    # Optional: compare against Template ground truth if present.
-    tpl_base = os.path.join("Template", "portfolio_test_returns.csv")
-    tpl_ml = os.path.join("Template", "portfolio_test_returns_ml.csv")
-    if os.path.exists(tpl_base) and os.path.exists(tpl_ml):
-        a = pd.read_csv(tpl_base)["portfolio_return"].to_numpy(dtype=float)
-        b = pd.read_csv(base_csv)["portfolio_return"].to_numpy(dtype=float)
-        c = pd.read_csv(tpl_ml)["portfolio_return_ml"].to_numpy(dtype=float)
-        d = pd.read_csv(ml_csv)["portfolio_return_ml"].to_numpy(dtype=float)
+    # Optional: compare against ground truth (Template/ if present; else src fixture).
+    candidates = [
+        (os.path.join("Template", "portfolio_test_returns.csv"), os.path.join("Template", "portfolio_test_returns_ml.csv")),
+        (
+            os.path.join(ROOT, "src", "tema", "benchmarks", "template_default_universe", "portfolio_test_returns.csv"),
+            os.path.join(ROOT, "src", "tema", "benchmarks", "template_default_universe", "portfolio_test_returns_ml.csv"),
+        ),
+    ]
 
-        print("baseline max_abs_diff:", float(np.max(np.abs(a - b))) if len(a) == len(b) else "len_mismatch")
-        print("ml       max_abs_diff:", float(np.max(np.abs(c - d))) if len(c) == len(d) else "len_mismatch")
+    for tpl_base, tpl_ml in candidates:
+        if os.path.exists(tpl_base) and os.path.exists(tpl_ml):
+            a = pd.read_csv(tpl_base)["portfolio_return"].to_numpy(dtype=float)
+            b = pd.read_csv(base_csv)["portfolio_return"].to_numpy(dtype=float)
+            c = pd.read_csv(tpl_ml)["portfolio_return_ml"].to_numpy(dtype=float)
+            d = pd.read_csv(ml_csv)["portfolio_return_ml"].to_numpy(dtype=float)
+
+            print("ground_truth:", tpl_base)
+            print("baseline max_abs_diff:", float(np.max(np.abs(a - b))) if len(a) == len(b) else "len_mismatch")
+            print("ml       max_abs_diff:", float(np.max(np.abs(c - d))) if len(c) == len(d) else "len_mismatch")
+            break
 
     return 0
 
