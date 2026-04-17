@@ -187,7 +187,8 @@ def test_pipeline_template_default_universe_applies_template_data_profile(tmp_pa
     assert portfolio_info["portfolio_modular_enabled"] is True
     assert portfolio_info["portfolio_modular_effective"] is True
     assert portfolio_info["portfolio_method"] in {"black_litterman_like", "mean_variance", "mean_variance_fallback"}
-    assert portfolio_info["expected_alpha_source"] == "strategy_train_returns_annualized"
+    assert portfolio_info["expected_alpha_source"] == "strategy_train_returns_geometric_annualized"
+    assert portfolio_info["expected_alpha_method"] == "geometric_annualized_per_asset"
     assert portfolio_info["returns_window_source"] == "strategy_train_returns"
     assert portfolio_info["split_mode"] == "per_asset"
     assert portfolio_info["assets"] == ["long"]

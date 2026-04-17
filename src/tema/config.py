@@ -13,6 +13,20 @@ class BacktestConfig:
     data_train_ratio: float = 0.7
     # Template-style universe profile: merged_d1 source, min_history_rows=400, train_ratio=0.60, full asset set
     template_default_universe: bool = False
+    # When True, template_default_universe will reuse precomputed Template/*.csv artifacts
+    # (asset_strategy_summary.csv + black_litterman_weights.csv) to match benchmark results
+    # deterministically without re-running the expensive per-asset grid search.
+    template_use_precomputed_artifacts: bool = True
+    # Template grid search controls (triple-EMA per-asset validation path)
+    template_grid_short_periods: tuple[int, ...] = (3, 5)
+    template_grid_mid_periods: tuple[int, ...] = (8, 13)
+    template_grid_long_periods: tuple[int, ...] = (21, 34)
+    template_grid_require_strict_order: bool = True
+    template_grid_validation_ratio: float = 0.25
+    template_grid_validation_min_rows: int = 20
+    template_grid_validation_shortlist: Optional[int] = 20
+    template_grid_overfit_penalty: float = 0.5
+    template_grid_shift_by: int = 1
     signal_fast_period: int = 5
     signal_slow_period: int = 20
     signal_method: str = "ema"

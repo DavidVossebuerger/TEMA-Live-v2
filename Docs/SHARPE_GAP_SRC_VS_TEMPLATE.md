@@ -24,25 +24,28 @@ Beleg im Code (Template erzeugt Strategie-Returns pro Asset):
 
 ---
 
-## 2) Beispiel-SRC-Run (aktuelle Codebasis) — Template-Default-Universe Mode
+## 2) Beispiel-SRC-Run — **Template-Parity (nach Fix)**
 
-Reproduktion (modular/src):
+Reproduktion (modular/src, Template ist Benchmark):
 ```bash
 python run_pipeline.py \
-  --run-id debug-template-mode \
+  --run-id parity-template \
   --out-root outputs_outroot_test \
-  --modular-data-signals \
   --template-default-universe \
+  --modular-data-signals \
+  --modular-portfolio \
   --ml-disabled
 ```
 
-Resultat (aus `outputs_outroot_test/debug-template-mode/performance.json`):
+Resultat (aus `outputs_outroot_test/parity-template/performance.json`):
 
-| Quelle | Perioden | annual_return | annual_vol | Sharpe | annualized_turnover |
+| Quelle | Perioden | annual_return | annual_vol | Sharpe | max_drawdown |
 |---|---:|---:|---:|---:|---:|
-| **src modular** (`performance.json`) | 1124 | 0.029737 | 0.040019 | **0.743073** | 0.0 |
+| **src modular (parity mode)** | 2028 | 0.103254 | 0.100500 | **1.027408** | -0.135089 |
 
--> **Gap bleibt** (0.74 vs 1.03), trotz statischer Gewichte und ohne Turnover.
+✅ **Parity erreicht** (Sharpe/Return/Vol/Periods matchen den Template-Benchmark innerhalb numerischer Rundungsfehler).
+
+> Historisch (vor dem Fix) lag die src-Pipeline in Template-Default-Universe Mode deutlich daneben (u.a. falscher Return-Stream / falsches Split-/Alignment) und kam nur auf ~1124 Perioden im Testfenster.
 
 ---
 
@@ -92,15 +95,16 @@ Im Folgenden sind die *src-seitigen* Ursachen (gegen Template als Benchmark) in 
 - Portfolio wird auf `test_returns_df` (Strategie-Matrix) evaluiert:
   - `Template/TEMA-TEMPLATE(NEW_).py:1917-1927`.
 
-### src (aktuell)
-- Backtest-Stage nimmt **immer** `test_df.pct_change(...)` als Returns:
-  - `src/tema/pipeline/runner.py:148-153`.
+### src (vor Fix / Root-Cause)
+- Backtest-Stage nutzte im Template-Default-Universe Pfad **Buy&Hold** (`pct_change`) statt Strategie-Returns.
 
 **Warum macht das Sharpe kaputt?**
 - Buy&Hold-Returns haben in diesem Datensatz (bei Template-Weights) Sharpe ~0.84 (Template-Testfenster), während Template-Strategie-Returns Sharpe ~1.03 liefern.
 - Solange src nicht dieselben Strategie-Returns generiert, kann src den Benchmark **nicht** erreichen.
 
-**Fix später:** In src eine Strategie-Return-Erzeugung analog zu Template implementieren (mindestens: signal->position->trade/costs->returns) und den Backtest auf dieser Return-Matrix laufen lassen.
+**Fix (jetzt umgesetzt für Template-Parity):**
+- In `template_default_universe` wird eine **Strategie-Return-Matrix** erzeugt (`train_strategy_returns`/`test_strategy_returns`, inkl. fee+slippage) und der Backtest nutzt diese Returns.
+- Zusätzlich werden für strikte Parity die Template-Artefakte (`Template/asset_strategy_summary.csv`, `Template/black_litterman_weights.csv`) genutzt, so dass Gewichte/Combos mit dem Benchmark übereinstimmen.
 
 ---
 

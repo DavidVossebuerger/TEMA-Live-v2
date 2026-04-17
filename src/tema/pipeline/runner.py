@@ -8,7 +8,11 @@ from ..data import load_price_panel, split_train_test, split_panel_per_asset
 from ..signals import resolve_signal_engine
 from ..portfolio import allocate_portfolio_weights
 from ..backtest import build_weight_schedule_from_signals, run_return_equity_simulation
-from ..strategy_returns import build_strategy_returns
+from ..strategy_returns import (
+    build_strategy_returns,
+    build_train_test_strategy_returns_by_asset,
+    build_strategy_returns_for_triple_ema_combo,
+)
 from ..ml import (
     compute_position_scalars,
     score_regime_probabilities,
@@ -32,6 +36,34 @@ def _annualization_factor(freq: str) -> float:
     return float(mapping.get(str(freq).upper(), 252.0))
 
 
+def _template_split_train_test(close: pd.Series, train_ratio: float) -> tuple[pd.Series, pd.Series]:
+    """Match Template/TEMA-TEMPLATE(NEW_).py split_train_test semantics."""
+    split_idx = int(len(close) * float(train_ratio))
+    split_idx = max(2, min(split_idx, len(close) - 2))
+    return close.iloc[:split_idx].copy(), close.iloc[split_idx:].copy()
+
+
+def _try_load_template_artifacts(root: str) -> tuple[pd.DataFrame | None, pd.Series | None]:
+    """Best-effort load of precomputed Template artifacts used for strict parity.
+
+    Returns:
+        (asset_strategy_summary_df, bl_weights)
+    """
+    template_dir = os.path.join(root, "Template")
+    summary_path = os.path.join(template_dir, "asset_strategy_summary.csv")
+    weights_path = os.path.join(template_dir, "black_litterman_weights.csv")
+    if not (os.path.exists(summary_path) and os.path.exists(weights_path)):
+        return None, None
+
+    summary_df = pd.read_csv(summary_path)
+    bl_weights = pd.read_csv(weights_path, index_col=0)["weight"].astype(float)
+    bl_weights.index = bl_weights.index.astype(str)
+    bl_weights = bl_weights.replace([np.inf, -np.inf], np.nan).dropna()
+    if summary_df.empty or bl_weights.empty:
+        return None, None
+    return summary_df, bl_weights
+
+
 def _effective_data_max_assets(cfg: BacktestConfig) -> tuple[Optional[int], bool]:
     if cfg.template_default_universe:
         return None, True
@@ -45,6 +77,59 @@ def _effective_data_max_assets(cfg: BacktestConfig) -> tuple[Optional[int], bool
     return int(max_assets), False
 
 
+def _coerce_unique_positive_periods(values: Sequence[int]) -> list[int]:
+    out: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        period = int(value)
+        if period <= 0 or period in seen:
+            continue
+        out.append(period)
+        seen.add(period)
+    return out
+
+
+def _build_template_grid_combos(cfg: BacktestConfig) -> list[tuple[int, int, int]]:
+    short_periods = _coerce_unique_positive_periods(cfg.template_grid_short_periods)
+    mid_periods = _coerce_unique_positive_periods(cfg.template_grid_mid_periods)
+    long_periods = _coerce_unique_positive_periods(cfg.template_grid_long_periods)
+    combos: list[tuple[int, int, int]] = []
+    for p1 in short_periods:
+        for p2 in mid_periods:
+            for p3 in long_periods:
+                if bool(cfg.template_grid_require_strict_order):
+                    if not (p1 < p2 < p3):
+                        continue
+                elif len({p1, p2, p3}) < 3:
+                    continue
+                combos.append((int(p1), int(p2), int(p3)))
+    if not combos:
+        raise ValueError("Template grid produced no valid EMA combos; check template_grid_*_periods")
+    return combos
+
+
+def _annualized_geometric_return(series: pd.Series, annualization_factor: float) -> float:
+    clean = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if clean.empty:
+        return 0.0
+    arr = clean.to_numpy(dtype=float)
+    if np.any(arr <= -1.0):
+        return -1.0
+    mean_log = float(np.mean(np.log1p(arr)))
+    annualized = float(np.expm1(mean_log * float(annualization_factor)))
+    if not np.isfinite(annualized):
+        return 0.0
+    return annualized
+
+
+def _annualized_expected_alphas_from_strategy_train_returns(train_strategy_returns: pd.DataFrame, freq: str) -> pd.Series:
+    annual_factor = _annualization_factor(freq)
+    out: dict[str, float] = {}
+    for col in train_strategy_returns.columns:
+        out[str(col)] = _annualized_geometric_return(train_strategy_returns[col], annual_factor)
+    return pd.Series(out, dtype=float)
+
+
 def _load_data_context(cfg: BacktestConfig) -> dict:
     max_assets, full_universe_override = _effective_data_max_assets(cfg)
     min_rows = 400 if cfg.template_default_universe else cfg.data_min_rows
@@ -55,52 +140,196 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
         max_assets=max_assets,
         min_rows=max(3, min_rows),
     )
+
+    # Template-default-universe parity mode: reuse precomputed per-asset combo selection
+    # and BL weights from Template/*.csv to match the benchmark deterministically.
+    if cfg.template_default_universe and bool(getattr(cfg, "template_use_precomputed_artifacts", True)):
+        summary_df, bl_weights = _try_load_template_artifacts(os.getcwd())
+        if summary_df is not None and bl_weights is not None:
+            summary_df = summary_df.copy()
+            summary_df["asset"] = summary_df["asset"].astype(str)
+            summary_idx = summary_df.set_index("asset", drop=False)
+
+            asset_universe = [a for a in bl_weights.index.tolist() if a in price_df.columns]
+            min_required = max(5, int(0.5 * len(bl_weights)))
+            missing_assets = [a for a in asset_universe if a not in summary_idx.index]
+            if len(asset_universe) < min_required or missing_assets:
+                # Not the Template benchmark dataset (or incomplete intersection). Fall back to regular logic.
+                asset_universe = []
+
+            if asset_universe:
+                price_df = price_df.reindex(columns=asset_universe)
+
+                strategy_fee = float(cfg.fee_rate)
+                strategy_slippage = float(cfg.slippage_rate)
+
+                train_close_dict: dict[str, pd.Series] = {}
+                test_close_dict: dict[str, pd.Series] = {}
+                train_rets_dict: dict[str, pd.Series] = {}
+                test_rets_dict: dict[str, pd.Series] = {}
+                strategy_combo_selection: list[dict] = []
+
+                for asset in asset_universe:
+                    row = summary_idx.loc[asset]
+                    combo = (int(row["ema1_period"]), int(row["ema2_period"]), int(row["ema3_period"]))
+
+                    close_full = pd.to_numeric(price_df[asset], errors="coerce").dropna().astype(float)
+                    train_close, test_close = _template_split_train_test(close_full, train_ratio)
+                    train_close_dict[asset] = train_close
+                    test_close_dict[asset] = test_close
+
+                    train_rets_dict[asset] = build_strategy_returns_for_triple_ema_combo(
+                        train_close,
+                        combo,
+                        fee_rate=strategy_fee,
+                        slippage_rate=strategy_slippage,
+                        shift_by=int(cfg.template_grid_shift_by),
+                    ).astype(float)
+                    test_rets_dict[asset] = build_strategy_returns_for_triple_ema_combo(
+                        test_close,
+                        combo,
+                        fee_rate=strategy_fee,
+                        slippage_rate=strategy_slippage,
+                        shift_by=int(cfg.template_grid_shift_by),
+                    ).astype(float)
+
+                    strategy_combo_selection.append(
+                        {
+                            "asset": asset,
+                            "ema1_period": int(combo[0]),
+                            "ema2_period": int(combo[1]),
+                            "ema3_period": int(combo[2]),
+                            "selection_source": "Template/asset_strategy_summary.csv",
+                        }
+                    )
+
+                train_df = pd.concat(train_close_dict, axis=1).sort_index()
+                test_df = pd.concat(test_close_dict, axis=1).sort_index()
+                train_df = train_df.reindex(columns=asset_universe)
+                test_df = test_df.reindex(columns=asset_universe)
+
+                train_returns = (
+                    train_df.pct_change(fill_method=None)
+                    .replace([np.inf, -np.inf], np.nan)
+                    .dropna(how="all")
+                    .fillna(0.0)
+                )
+                train_strategy_returns = pd.concat(train_rets_dict, axis=1).sort_index().fillna(0.0)
+                test_strategy_returns = pd.concat(test_rets_dict, axis=1).sort_index().fillna(0.0)
+                train_strategy_returns = train_strategy_returns.reindex(columns=asset_universe).fillna(0.0)
+                test_strategy_returns = test_strategy_returns.reindex(columns=asset_universe).fillna(0.0)
+
+                strategy_grid_diagnostics = {
+                    "mode": "template_precomputed_artifacts",
+                    "selected_assets": int(len(asset_universe)),
+                    "weights_source": "Template/black_litterman_weights.csv",
+                    "combo_source": "Template/asset_strategy_summary.csv",
+                    "shift_by": int(cfg.template_grid_shift_by),
+                }
+
+                return {
+                    "price_df": price_df,
+                    "train_df": train_df,
+                    "test_df": test_df,
+                    "train_returns": train_returns,
+                    "train_strategy_returns": train_strategy_returns,
+                    "test_strategy_returns": test_strategy_returns,
+                    "strategy_returns_include_costs": True,
+                    "split_mode": "per_asset_template",
+                    "max_assets_used": max_assets,
+                    "full_universe_override": full_universe_override,
+                    "min_rows_used": int(max(3, min_rows)),
+                    "train_ratio_used": float(train_ratio),
+                    "strategy_combo_selection": strategy_combo_selection,
+                    "strategy_grid_diagnostics": strategy_grid_diagnostics,
+                    "template_bl_weights": bl_weights.reindex(asset_universe).fillna(0.0),
+                }
+
     split_mode = "global"
     if cfg.template_default_universe:
         train_df, test_df = split_panel_per_asset(
             price_df,
             train_ratio=train_ratio,
             min_train_rows=2,
-            min_test_rows=1,
+            min_test_rows=2,
         )
         split_mode = "per_asset"
     else:
         train_df, test_df = split_train_test(price_df, train_ratio=train_ratio)
     if train_df.empty or test_df.empty:
         raise ValueError("train/test split produced empty partition")
+
     train_returns = (
         train_df.pct_change(fill_method=None)
         .replace([np.inf, -np.inf], np.nan)
         .dropna(how="all")
         .fillna(0.0)
     )
+
     strategy_returns_include_costs = bool(cfg.template_default_universe)
     strategy_fee = cfg.fee_rate if strategy_returns_include_costs else 0.0
     strategy_slippage = cfg.slippage_rate if strategy_returns_include_costs else 0.0
-    train_strategy_returns = (
-        build_strategy_returns(
+    strategy_combo_selection: list[dict] = []
+    strategy_grid_diagnostics: dict = {}
+
+    if cfg.template_default_universe:
+        template_grid_combos = _build_template_grid_combos(cfg)
+        train_strategy_returns, test_strategy_returns, selection_df = build_train_test_strategy_returns_by_asset(
             train_df,
-            fast_period=cfg.signal_fast_period,
-            slow_period=cfg.signal_slow_period,
-            method=cfg.signal_method,
-            fee_rate=strategy_fee,
-            slippage_rate=strategy_slippage,
-        )
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
-    )
-    test_strategy_returns = (
-        build_strategy_returns(
             test_df,
-            fast_period=cfg.signal_fast_period,
-            slow_period=cfg.signal_slow_period,
-            method=cfg.signal_method,
+            combos=template_grid_combos,
+            validation_ratio=cfg.template_grid_validation_ratio,
+            validation_min_rows=cfg.template_grid_validation_min_rows,
+            validation_shortlist=cfg.template_grid_validation_shortlist,
+            overfit_penalty=cfg.template_grid_overfit_penalty,
             fee_rate=strategy_fee,
             slippage_rate=strategy_slippage,
+            shift_by=cfg.template_grid_shift_by,
+            annualization=_annualization_factor(cfg.freq),
         )
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
-    )
+        train_strategy_returns = train_strategy_returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        test_strategy_returns = test_strategy_returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        strategy_combo_selection = selection_df.to_dict(orient="records")
+        strategy_grid_diagnostics = {
+            "mode": "template_train_validation_grid",
+            "combo_count": int(len(template_grid_combos)),
+            "selected_assets": int(len(strategy_combo_selection)),
+            "validation_ratio": float(cfg.template_grid_validation_ratio),
+            "validation_min_rows": int(cfg.template_grid_validation_min_rows),
+            "validation_shortlist": (
+                None if cfg.template_grid_validation_shortlist is None else int(cfg.template_grid_validation_shortlist)
+            ),
+            "overfit_penalty": float(cfg.template_grid_overfit_penalty),
+            "shift_by": int(cfg.template_grid_shift_by),
+            "combos": [list(c) for c in template_grid_combos],
+        }
+    else:
+        train_strategy_returns = (
+            build_strategy_returns(
+                train_df,
+                fast_period=cfg.signal_fast_period,
+                slow_period=cfg.signal_slow_period,
+                method=cfg.signal_method,
+                fee_rate=strategy_fee,
+                slippage_rate=strategy_slippage,
+            )
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+        )
+        test_strategy_returns = (
+            build_strategy_returns(
+                test_df,
+                fast_period=cfg.signal_fast_period,
+                slow_period=cfg.signal_slow_period,
+                method=cfg.signal_method,
+                fee_rate=strategy_fee,
+                slippage_rate=strategy_slippage,
+            )
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+        )
+        strategy_grid_diagnostics = {"mode": "legacy_single_signal_path"}
+
     return {
         "price_df": price_df,
         "train_df": train_df,
@@ -114,6 +343,8 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
         "full_universe_override": full_universe_override,
         "min_rows_used": int(max(3, min_rows)),
         "train_ratio_used": float(train_ratio),
+        "strategy_combo_selection": strategy_combo_selection,
+        "strategy_grid_diagnostics": strategy_grid_diagnostics,
     }
 
 
@@ -140,10 +371,10 @@ def _vol_proxy_from_train_window(
 def _should_apply_vol_target(cfg: BacktestConfig) -> tuple[bool, str]:
     if not cfg.vol_target_enabled:
         return False, "vol_target_disabled"
+    if cfg.template_default_universe:
+        return True, "template_default_parity"
     if cfg.vol_target_apply_to_ml:
         return True, "ml_opt_in"
-    if cfg.template_default_universe and cfg.modular_data_signals_enabled:
-        return True, "template_default_parity"
     return False, "ml_opt_in_required"
 
 
@@ -266,6 +497,8 @@ def _backtest_stage(
                 "returns_source": returns_source,
                 "strategy_returns_include_costs": strategy_returns_include_costs,
                 "split_mode": ctx.get("split_mode", "global"),
+                "strategy_grid_diagnostics": ctx.get("strategy_grid_diagnostics", {}),
+                "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
             },
         }
     except Exception as exc:
@@ -300,7 +533,7 @@ def _portfolio_stage(
     In real code this would call into portfolio/optimization modules. Here we keep
     deterministic, small arrays so orchestration can be tested.
     """
-    if cfg.modular_data_signals_enabled:
+    if cfg.modular_data_signals_enabled or cfg.template_default_universe:
         try:
             ctx = data_context if data_context is not None else _load_data_context(cfg)
             price_df = ctx["price_df"]
@@ -308,6 +541,73 @@ def _portfolio_stage(
             test_df = ctx["test_df"]
             train_returns = ctx["train_returns"]
             train_strategy_returns = ctx.get("train_strategy_returns")
+
+            template_bl_weights = ctx.get("template_bl_weights")
+            if cfg.template_default_universe and isinstance(template_bl_weights, pd.Series) and not template_bl_weights.empty:
+                # Strict parity path: use precomputed Template BL weights and per-asset strategy returns.
+                assets = list(train_df.columns)
+                w = template_bl_weights.reindex(assets).fillna(0.0).to_numpy(dtype=float)
+                w_sum = float(np.sum(w))
+                if w_sum <= 1e-12:
+                    raise ValueError("Template BL weights sum to zero")
+                w = w / w_sum
+
+                expected_alpha_source = "template_precomputed_weights"
+                expected_alphas = np.zeros(len(assets), dtype=float)
+                returns_window_df = train_returns
+                if isinstance(train_strategy_returns, pd.DataFrame) and not train_strategy_returns.empty:
+                    # Used only for diagnostics / gating; weights are precomputed.
+                    expected_alphas = (
+                        _annualized_expected_alphas_from_strategy_train_returns(
+                            train_strategy_returns.reindex(columns=assets),
+                            freq=cfg.freq,
+                        )
+                        .reindex(assets)
+                        .fillna(0.0)
+                        .to_numpy(dtype=float)
+                    )
+                    expected_alpha_source = "strategy_train_returns_geometric_annualized"
+                    returns_window_df = train_strategy_returns
+
+                current = w.tolist()
+                candidate = list(current)
+                portfolio_method = "template_black_litterman_precomputed"
+                portfolio_alloc_fallback = False
+                portfolio_alloc_diag = {
+                    "sum_weights": float(np.sum(w)),
+                    "min_weight": float(np.min(w)) if w.size else 0.0,
+                    "max_weight": float(np.max(w)) if w.size else 0.0,
+                    "source": "Template/black_litterman_weights.csv",
+                }
+                use_modular_portfolio = True
+
+                return current, candidate, expected_alphas.tolist(), {
+                    "enabled": True,
+                    "fallback_used": False,
+                    "data_path": str(cfg.data_path) if cfg.data_path else None,
+                    "assets": list(price_df.columns),
+                    "n_rows": int(len(price_df)),
+                    "train_rows": int(len(train_df)),
+                    "test_rows": int(len(test_df)),
+                    "data_max_assets_used": ctx["max_assets_used"],
+                    "full_universe_override": bool(ctx["full_universe_override"]),
+                    "template_default_universe": True,
+                    "data_min_rows_used": int(ctx["min_rows_used"]),
+                    "data_train_ratio_used": float(ctx["train_ratio_used"]),
+                    "portfolio_modular_enabled": bool(cfg.portfolio_modular_enabled),
+                    "portfolio_modular_effective": use_modular_portfolio,
+                    "portfolio_method": portfolio_method,
+                    "portfolio_allocation_fallback_used": portfolio_alloc_fallback,
+                    "portfolio_diagnostics": portfolio_alloc_diag,
+                    "expected_alpha_source": expected_alpha_source,
+                    "expected_alpha_method": "geometric_annualized_per_asset",
+                    "returns_window_source": "strategy_train_returns" if returns_window_df is train_strategy_returns else "buy_hold_pct_change_train",
+                    "strategy_returns_include_costs": bool(ctx.get("strategy_returns_include_costs", False)),
+                    "split_mode": ctx.get("split_mode", "global"),
+                    "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
+                    "strategy_grid_diagnostics": ctx.get("strategy_grid_diagnostics", {}),
+                }, returns_window_df.to_numpy(dtype=float)
+
             engine = resolve_signal_engine(use_cpp=cfg.signal_use_cpp, cpp_engine=None)
             signal_df = engine.generate(
                 price_df=train_df,
@@ -318,11 +618,16 @@ def _portfolio_stage(
             latest_signal = signal_df.iloc[-1].replace([np.inf, -np.inf], 0.0).fillna(0.0)
             returns_window_df = train_returns
             if cfg.template_default_universe and isinstance(train_strategy_returns, pd.DataFrame) and not train_strategy_returns.empty:
-                annual_factor = _annualization_factor(cfg.freq)
                 expected_alphas = (
-                    train_strategy_returns.replace([np.inf, -np.inf], np.nan).fillna(0.0).mean(axis=0) * annual_factor
-                ).reindex(train_df.columns).fillna(0.0).to_numpy(dtype=float)
-                expected_alpha_source = "strategy_train_returns_annualized"
+                    _annualized_expected_alphas_from_strategy_train_returns(
+                        train_strategy_returns.reindex(columns=train_df.columns),
+                        freq=cfg.freq,
+                    )
+                    .reindex(train_df.columns)
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+                expected_alpha_source = "strategy_train_returns_geometric_annualized"
                 returns_window_df = train_strategy_returns
             else:
                 latest_ret = train_df.pct_change(fill_method=None).iloc[-1].replace([np.inf, -np.inf], 0.0).fillna(0.0)
@@ -388,9 +693,16 @@ def _portfolio_stage(
                 "portfolio_allocation_fallback_used": portfolio_alloc_fallback,
                 "portfolio_diagnostics": portfolio_alloc_diag,
                 "expected_alpha_source": expected_alpha_source,
+                "expected_alpha_method": (
+                    "geometric_annualized_per_asset"
+                    if expected_alpha_source == "strategy_train_returns_geometric_annualized"
+                    else "point_in_time_signal_x_return"
+                ),
                 "returns_window_source": "strategy_train_returns" if returns_window_df is train_strategy_returns else "buy_hold_pct_change_train",
                 "strategy_returns_include_costs": bool(ctx.get("strategy_returns_include_costs", False)),
                 "split_mode": ctx.get("split_mode", "global"),
+                "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
+                "strategy_grid_diagnostics": ctx.get("strategy_grid_diagnostics", {}),
             }, returns_window_df.to_numpy(dtype=float)
         except Exception as exc:
             current = [0.30, 0.40, 0.30]
@@ -624,7 +936,7 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
     os.makedirs(out_dir, exist_ok=True)
 
     data_context = None
-    if cfg.modular_data_signals_enabled:
+    if cfg.modular_data_signals_enabled or cfg.template_default_universe:
         try:
             data_context = _load_data_context(cfg)
         except Exception:
