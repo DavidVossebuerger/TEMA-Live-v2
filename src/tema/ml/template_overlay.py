@@ -620,9 +620,17 @@ def compute_template_ml_overlay(
 
     if include_series:
         out["series"] = {
+            "base_train": {
+                "datetime": scaled_train.index.astype(str).tolist(),
+                "portfolio_return": scaled_train.astype(float).tolist(),
+            },
             "base_test": {
                 "datetime": scaled_test.index.astype(str).tolist(),
                 "portfolio_return": scaled_test.astype(float).tolist(),
+            },
+            "ml_train": {
+                "datetime": scaled_ml_train.index.astype(str).tolist(),
+                "portfolio_return_ml": scaled_ml_train.astype(float).tolist(),
             },
             "ml_test": {
                 "datetime": scaled_ml_test.index.astype(str).tolist(),

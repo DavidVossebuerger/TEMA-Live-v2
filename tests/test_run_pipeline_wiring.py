@@ -27,6 +27,8 @@ def test_run_modular_wires_new_knobs(monkeypatch):
         modular_data_signals_enabled=True,
         modular_portfolio_enabled=True,
         ml_modular_path_enabled=True,
+        ml_template_overlay=True,
+        ml_meta_overlay=True,
         ml_probability_threshold=0.55,
         data_max_assets=11,
         data_full_universe_for_parity=False,
@@ -43,6 +45,8 @@ def test_run_modular_wires_new_knobs(monkeypatch):
     assert cfg.modular_data_signals_enabled is True
     assert cfg.portfolio_modular_enabled is True
     assert cfg.ml_modular_path_enabled is True
+    assert cfg.ml_template_overlay_enabled is True
+    assert cfg.ml_meta_overlay_enabled is True
     assert cfg.ml_probability_threshold == 0.55
     assert cfg.data_max_assets == 11
     assert cfg.data_full_universe_for_parity is False

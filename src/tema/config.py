@@ -81,6 +81,20 @@ class BacktestConfig:
     ml_auto_threshold: bool = True
     ml_target_exposure: float = 0.10
 
+    # Phase1 meta overlay (ML_META): scale ML series by a learned exposure time-series
+    ml_meta_overlay_enabled: bool = False
+    ml_meta_lags: int = 5
+    ml_meta_roll: int = 5
+    ml_meta_k_min: float = 0.5
+    ml_meta_k_max: float = 8.0
+    ml_meta_k_steps: int = 32
+    ml_meta_floors: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8, 0.9)
+    ml_meta_min_vol_ratio: float = 0.5
+    ml_meta_min_mean_abs_exposure: float = 0.7
+    ml_meta_min_turnover_per_year: float = 5.0
+    ml_meta_target_mean_abs_exposure: float = 0.9
+    ml_meta_target_turnover_per_year: float = 20.0
+
     # Vol-target scaling controls
     vol_target_enabled: bool = True
     vol_target_annual: float = 0.10

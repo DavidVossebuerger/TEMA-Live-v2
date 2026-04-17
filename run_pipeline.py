@@ -162,6 +162,7 @@ def run_modular(
     ml_enabled: bool = True,
     ml_modular_path_enabled: bool = False,
     ml_template_overlay: bool = False,
+    ml_meta_overlay: bool = False,
     ml_probability_threshold: float = 0.0,
     data_max_assets: int = 3,
     data_full_universe_for_parity: bool = True,
@@ -208,6 +209,7 @@ def run_modular(
         ml_enabled=ml_enabled,
         ml_modular_path_enabled=ml_modular_path_enabled,
         ml_template_overlay_enabled=ml_template_overlay,
+        ml_meta_overlay_enabled=ml_meta_overlay,
         ml_probability_threshold=ml_probability_threshold,
         data_max_assets=data_max_assets,
         data_full_universe_for_parity=data_full_universe_for_parity,
@@ -246,6 +248,7 @@ def main(argv=None):
     p.add_argument("--ml-disabled", action="store_true")
     p.add_argument("--ml-modular-path", action="store_true")
     p.add_argument("--ml-template-overlay", action="store_true", help="Apply Template-like ML overlay in template_default_universe mode")
+    p.add_argument("--ml-meta-overlay", action="store_true", help="Apply Template phase1 meta overlay (ML_META) on top of ML overlay")
     p.add_argument("--ml-prob-threshold", type=float, default=0.0)
     p.add_argument("--data-max-assets", type=int, default=3)
     p.add_argument("--disable-full-universe-override", action="store_true")
@@ -277,6 +280,7 @@ def main(argv=None):
             ml_enabled=(not args.ml_disabled),
             ml_modular_path_enabled=args.ml_modular_path,
             ml_template_overlay=args.ml_template_overlay,
+            ml_meta_overlay=args.ml_meta_overlay,
             ml_probability_threshold=args.ml_prob_threshold,
             data_max_assets=args.data_max_assets,
             data_full_universe_for_parity=(not args.disable_full_universe_override),

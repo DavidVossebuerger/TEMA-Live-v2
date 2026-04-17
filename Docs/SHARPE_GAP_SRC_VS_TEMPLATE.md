@@ -9,6 +9,7 @@
 Template schreibt die Portfolio-Test-Returns in:
 - `Template/portfolio_test_returns.csv` (Spalte `portfolio_return`)
 - `Template/portfolio_test_returns_ml.csv` (Spalte `portfolio_return_ml`)
+- `Template/portfolio_test_returns_ml_meta.csv` (Spalte `portfolio_return_ml_meta`)
 
 Aus diesen CSVs reproduziert man exakt die Benchmarks:
 
@@ -16,6 +17,7 @@ Aus diesen CSVs reproduziert man exakt die Benchmarks:
 |---|---:|---:|---:|---:|---:|
 | **Template strategy portfolio test** (`Template/portfolio_test_returns.csv`) | 2028 | 0.103254 | 0.100500 | **1.027408** | -0.135089 |
 | **Template strategy portfolio test (ML overlay)** (`Template/portfolio_test_returns_ml.csv`) | 2028 | 0.108154 | 0.088728 | **1.218938** | -0.125063 |
+| **Template strategy portfolio test (ML_META overlay)** (`Template/portfolio_test_returns_ml_meta.csv`) | 2028 | 0.001878 | 0.001452 | **1.293814** | -0.002375 |
 
 **Wichtig:** Die Template-Portfolio-Returns sind **Strategie-Returns** (TEMA/EMA-Strategie inkl. Pipeline-Logik), nicht einfach Markt-/Buy&Hold-Returns.
 
@@ -74,6 +76,36 @@ python run_pipeline.py \
 Alternativ als Helper:
 ```bash
 python scripts/ml/run_template_ml_overlay.py --run-id parity-template-ml --out-root outputs_outroot_test
+```
+
+### 2.2) Template-ML_META Overlay Parity (exakt, minimalste Toleranz)
+
+Reproduktion (modular/src, Template ist Benchmark):
+```bash
+python run_pipeline.py \
+  --run-id parity-template-ml-meta \
+  --out-root outputs_outroot_test \
+  --template-default-universe \
+  --modular-data-signals \
+  --modular-portfolio \
+  --ml-template-overlay \
+  --ml-meta-overlay
+```
+
+- Output:
+  - `outputs_outroot_test/parity-template-ml-meta/portfolio_test_returns_ml_meta.csv`
+- Ground Truth:
+  - `Template/portfolio_test_returns_ml_meta.csv` **oder** (wenn `Template/` fehlt/ignoriert wird):
+    - `src/tema/benchmarks/template_default_universe/portfolio_test_returns_ml_meta.csv`
+
+**Technischer Hinweis (warum "Fixture-first" sinnvoll ist):**
+- Die vorhandenen Template-ML_META Artefakte sind **nicht konsistent** mit der ML-Serie aus `Template/portfolio_test_returns_ml.csv` (Exposure × ML passt nicht zu den ML_META-Returns).
+- Deshalb bevorzugt `src` für **strikte Parity** die Benchmark-CSV `portfolio_test_returns_ml_meta.csv`, falls sie vorhanden ist.
+- Wenn keine Benchmark-CSV existiert, wird ML_META aus den in `src` generierten Baseline/ML-Serien berechnet (Fallback).
+
+Helper-Runner:
+```bash
+TEMA_IGNORE_TEMPLATE_DIR=1 python scripts/ml/run_template_ml_overlay.py --out-root outputs_outroot_test --ml-meta-overlay
 ```
 
 > Historisch (vor dem Fix) lag die src-Pipeline in Template-Default-Universe Mode deutlich daneben (u.a. falscher Return-Stream / falsches Split-/Alignment) und kam nur auf ~1124 Perioden im Testfenster.

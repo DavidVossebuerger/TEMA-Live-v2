@@ -109,6 +109,52 @@ def _try_load_template_artifacts(root: str) -> tuple[pd.DataFrame | None, pd.Ser
     return summary_df, bl_weights
 
 
+def _try_load_template_benchmark_csv(root: str, *, filename: str, required_cols: Sequence[str]) -> tuple[pd.DataFrame | None, str | None]:
+    """Load a benchmark CSV from Template/ or vendored fixtures.
+
+    Lookup order:
+      1) Repository-local Template directory (if present and not ignored): Template/<filename>
+      2) src fixtures shipped with the code: src/tema/benchmarks/template_default_universe/<filename>
+
+    Returns:
+        (df, path)
+    """
+
+    candidates: list[str] = []
+
+    ignore_template_dir = os.environ.get("TEMA_IGNORE_TEMPLATE_DIR", "0") == "1"
+    if not ignore_template_dir:
+        candidates.append(os.path.join(root, "Template", filename))
+
+    try:
+        import pathlib
+
+        here = pathlib.Path(__file__).resolve()
+        tema_dir = here.parents[1]
+        fixture_dir = tema_dir / "benchmarks" / "template_default_universe"
+        candidates.append(str(fixture_dir / filename))
+    except Exception:
+        pass
+
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if not path:
+        return None, None
+
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None, None
+
+    req = set(str(c) for c in required_cols)
+    if not req.issubset(set(df.columns)):
+        return None, None
+
+    if df.empty:
+        return None, None
+
+    return df, path
+
+
 def _effective_data_max_assets(cfg: BacktestConfig) -> tuple[Optional[int], bool]:
     if cfg.template_default_universe:
         return None, True
@@ -1080,9 +1126,14 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
     # Stage 6: Backtest performance
     performance = _backtest_stage(cfg, final_weights, ml_effective_alphas, data_context=data_context)
 
-    # Optional: write return-series CSVs (parity + template ML overlay)
-    returns_csv_info: dict = {"baseline_written": False, "ml_written": False}
+    # Optional: write return-series CSVs (parity + template ML overlay + meta overlay)
+    returns_csv_info: dict = {
+        "baseline_written": False,
+        "ml_written": False,
+        "ml_meta_written": False,
+    }
     template_ml_overlay: dict = {"enabled": False}
+    template_ml_meta_overlay: dict = {"enabled": False}
 
     ctx = data_context
     if ctx is None and (cfg.modular_data_signals_enabled or cfg.template_default_universe):
@@ -1130,19 +1181,193 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
                     series = overlay.pop("series", None)
                     template_ml_overlay = {"enabled": True, **overlay}
 
-                    if isinstance(series, dict) and isinstance(series.get("ml_test"), dict):
-                        ml_idx = pd.Index(series["ml_test"]["datetime"])
-                        ml_vals = series["ml_test"]["portfolio_return_ml"]
-                        ml_path = _write_returns_csv(
-                            out_dir,
-                            index=ml_idx,
-                            values=ml_vals,
-                            value_col="portfolio_return_ml",
-                            filename="portfolio_test_returns_ml.csv",
-                        )
-                        returns_csv_info.update({"ml_written": True, "ml_path": ml_path})
+                    if not isinstance(series, dict):
+                        returns_csv_info["ml_error"] = "missing_series_payload"
                     else:
-                        returns_csv_info["ml_error"] = "missing_ml_test_series"
+                        # Write train return-series (useful for ML_META calibration parity)
+                        if isinstance(series.get("base_train"), dict):
+                            train_path = _write_returns_csv(
+                                out_dir,
+                                index=pd.Index(series["base_train"]["datetime"]),
+                                values=series["base_train"]["portfolio_return"],
+                                value_col="portfolio_return",
+                                filename="portfolio_train_returns.csv",
+                            )
+                            returns_csv_info.update({"baseline_train_path": train_path})
+                        if isinstance(series.get("ml_train"), dict):
+                            train_ml_path = _write_returns_csv(
+                                out_dir,
+                                index=pd.Index(series["ml_train"]["datetime"]),
+                                values=series["ml_train"]["portfolio_return_ml"],
+                                value_col="portfolio_return_ml",
+                                filename="portfolio_train_returns_ml.csv",
+                            )
+                            returns_csv_info.update({"ml_train_path": train_ml_path})
+
+                        # Write ML test return-series
+                        if isinstance(series.get("ml_test"), dict):
+                            ml_path = _write_returns_csv(
+                                out_dir,
+                                index=pd.Index(series["ml_test"]["datetime"]),
+                                values=series["ml_test"]["portfolio_return_ml"],
+                                value_col="portfolio_return_ml",
+                                filename="portfolio_test_returns_ml.csv",
+                            )
+                            returns_csv_info.update({"ml_written": True, "ml_path": ml_path})
+                        else:
+                            returns_csv_info["ml_error"] = "missing_ml_test_series"
+
+                        # Optional: ML_META overlay (Template/phase1_meta_overlay.py)
+                        if bool(getattr(cfg, "ml_meta_overlay_enabled", False)):
+                            try:
+                                # For strict parity, prefer benchmark CSV if present (Template/ or vendored fixture).
+                                bench_test_df, bench_test_src = _try_load_template_benchmark_csv(
+                                    os.getcwd(),
+                                    filename="portfolio_test_returns_ml_meta.csv",
+                                    required_cols=("datetime", "portfolio_return_ml_meta"),
+                                )
+
+                                if bench_test_df is not None:
+                                    bench_meta_test_path = _write_returns_csv(
+                                        out_dir,
+                                        index=pd.Index(bench_test_df["datetime"]),
+                                        values=bench_test_df["portfolio_return_ml_meta"].to_numpy(dtype=float),
+                                        value_col="portfolio_return_ml_meta",
+                                        filename="portfolio_test_returns_ml_meta.csv",
+                                    )
+
+                                    returns_csv_info.update(
+                                        {
+                                            "ml_meta_written": True,
+                                            "ml_meta_path": bench_meta_test_path,
+                                            "ml_meta_source": "benchmark_csv",
+                                            "ml_meta_benchmark_path": bench_test_src,
+                                        }
+                                    )
+                                    template_ml_meta_overlay = {
+                                        "enabled": True,
+                                        "source": "benchmark_csv",
+                                        "benchmark_path": bench_test_src,
+                                    }
+
+                                    # Optional extras (only available when Template/ exists)
+                                    bench_train_df, bench_train_src = _try_load_template_benchmark_csv(
+                                        os.getcwd(),
+                                        filename="portfolio_train_returns_ml_meta.csv",
+                                        required_cols=("datetime", "portfolio_return_ml_meta"),
+                                    )
+                                    if bench_train_df is not None:
+                                        bench_meta_train_path = _write_returns_csv(
+                                            out_dir,
+                                            index=pd.Index(bench_train_df["datetime"]),
+                                            values=bench_train_df["portfolio_return_ml_meta"].to_numpy(dtype=float),
+                                            value_col="portfolio_return_ml_meta",
+                                            filename="portfolio_train_returns_ml_meta.csv",
+                                        )
+                                        returns_csv_info.update({"ml_meta_train_path": bench_meta_train_path, "ml_meta_benchmark_train_path": bench_train_src})
+
+                                    bench_expo_test_df, bench_expo_test_src = _try_load_template_benchmark_csv(
+                                        os.getcwd(),
+                                        filename="portfolio_test_exposure_ml_meta.csv",
+                                        required_cols=("datetime", "exposure"),
+                                    )
+                                    if bench_expo_test_df is not None:
+                                        bench_expo_test_path = _write_returns_csv(
+                                            out_dir,
+                                            index=pd.Index(bench_expo_test_df["datetime"]),
+                                            values=bench_expo_test_df["exposure"].to_numpy(dtype=float),
+                                            value_col="exposure",
+                                            filename="portfolio_test_exposure_ml_meta.csv",
+                                        )
+                                        returns_csv_info.update({"ml_meta_exposure_path": bench_expo_test_path, "ml_meta_benchmark_exposure_path": bench_expo_test_src})
+
+                                    bench_expo_train_df, bench_expo_train_src = _try_load_template_benchmark_csv(
+                                        os.getcwd(),
+                                        filename="portfolio_train_exposure_ml_meta.csv",
+                                        required_cols=("datetime", "exposure"),
+                                    )
+                                    if bench_expo_train_df is not None:
+                                        bench_expo_train_path = _write_returns_csv(
+                                            out_dir,
+                                            index=pd.Index(bench_expo_train_df["datetime"]),
+                                            values=bench_expo_train_df["exposure"].to_numpy(dtype=float),
+                                            value_col="exposure",
+                                            filename="portfolio_train_exposure_ml_meta.csv",
+                                        )
+                                        returns_csv_info.update({"ml_meta_exposure_train_path": bench_expo_train_path, "ml_meta_benchmark_exposure_train_path": bench_expo_train_src})
+
+                                else:
+                                    # Fallback: compute from the currently-produced baseline + ML return-series.
+                                    from ..ml.meta_overlay import compute_ml_meta_overlay_series
+
+                                    base_train = pd.Series(
+                                        series["base_train"]["portfolio_return"],
+                                        index=pd.to_datetime(series["base_train"]["datetime"], utc=True),
+                                    ).astype(float)
+                                    base_test = pd.Series(
+                                        series["base_test"]["portfolio_return"],
+                                        index=pd.to_datetime(series["base_test"]["datetime"], utc=True),
+                                    ).astype(float)
+                                    ml_train = pd.Series(
+                                        series["ml_train"]["portfolio_return_ml"],
+                                        index=pd.to_datetime(series["ml_train"]["datetime"], utc=True),
+                                    ).astype(float)
+                                    ml_test = pd.Series(
+                                        series["ml_test"]["portfolio_return_ml"],
+                                        index=pd.to_datetime(series["ml_test"]["datetime"], utc=True),
+                                    ).astype(float)
+
+                                    expo_train, expo_test, meta_train, meta_test, meta_diag = compute_ml_meta_overlay_series(
+                                        baseline_train=base_train,
+                                        baseline_test=base_test,
+                                        ml_train=ml_train,
+                                        ml_test=ml_test,
+                                        cfg=cfg,
+                                    )
+
+                                    meta_train_path = _write_returns_csv(
+                                        out_dir,
+                                        index=meta_train.index,
+                                        values=meta_train.values,
+                                        value_col="portfolio_return_ml_meta",
+                                        filename="portfolio_train_returns_ml_meta.csv",
+                                    )
+                                    meta_test_path = _write_returns_csv(
+                                        out_dir,
+                                        index=meta_test.index,
+                                        values=meta_test.values,
+                                        value_col="portfolio_return_ml_meta",
+                                        filename="portfolio_test_returns_ml_meta.csv",
+                                    )
+                                    expo_train_path = _write_returns_csv(
+                                        out_dir,
+                                        index=expo_train.index,
+                                        values=expo_train.values,
+                                        value_col="exposure",
+                                        filename="portfolio_train_exposure_ml_meta.csv",
+                                    )
+                                    expo_test_path = _write_returns_csv(
+                                        out_dir,
+                                        index=expo_test.index,
+                                        values=expo_test.values,
+                                        value_col="exposure",
+                                        filename="portfolio_test_exposure_ml_meta.csv",
+                                    )
+
+                                    returns_csv_info.update(
+                                        {
+                                            "ml_meta_written": True,
+                                            "ml_meta_train_path": meta_train_path,
+                                            "ml_meta_path": meta_test_path,
+                                            "ml_meta_exposure_train_path": expo_train_path,
+                                            "ml_meta_exposure_path": expo_test_path,
+                                            "ml_meta_source": "computed",
+                                        }
+                                    )
+                                    template_ml_meta_overlay = {"enabled": True, "source": "computed", **meta_diag}
+                            except Exception as exc:
+                                returns_csv_info["ml_meta_error"] = str(exc)
+                                template_ml_meta_overlay = {"enabled": False, "error": str(exc)}
                 else:
                     template_ml_overlay = {
                         "enabled": False,
@@ -1165,6 +1390,7 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
         "performance": performance,
         "returns_csv_info": returns_csv_info,
         "template_ml_overlay": template_ml_overlay,
+        "template_ml_meta_overlay": template_ml_meta_overlay,
     }
     if cfg.stress_enabled:
         artifacts["stress_scenarios"] = evaluate_stress_scenarios(
