@@ -23,7 +23,7 @@ from ..ml import (
 from ..risk import dd_guard
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
@@ -1625,7 +1625,7 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
 
     manifest = {
         "run_id": run_id,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "artifacts": list(artifacts.keys()),
     }
 
