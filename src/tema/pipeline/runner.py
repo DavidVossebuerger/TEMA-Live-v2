@@ -1133,9 +1133,19 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
     final_weights = _scaling_stage(gated, ml_info, cfg, train_returns_window=train_returns_window)
 
     # Stage 5b: Drawdown guard overlay (optional)
-    dd_guard_info = {"enabled": False}
+    dd_guard_enabled = bool(getattr(cfg, "dd_guard_enabled", False))
+    dd_guard_info = {
+        "enabled": dd_guard_enabled,
+        "applied": False,
+        "max_drawdown": float(getattr(cfg, "dd_guard_max_drawdown", 0.10)),
+        "floor": float(getattr(cfg, "dd_guard_floor", 0.25)),
+        "recovery_halflife": int(getattr(cfg, "dd_guard_recovery_halflife", 20)),
+        "history_scalar_last": 1.0,
+    }
+    dd_guard_last_scalar = 1.0
     adjusted_schedule = None
-    if getattr(cfg, "dd_guard_enabled", False) and data_context is not None:
+
+    if dd_guard_enabled and data_context is not None:
         try:
             ctx = data_context
             # build historical pnl from training window using final_weights
@@ -1155,38 +1165,24 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
             if hist_pnl is not None and len(hist_pnl) > 0:
                 equity = pd.Series(np.cumprod(1.0 + np.asarray(hist_pnl, dtype=float)), index=hist_index)
                 drawdown = dd_guard.compute_drawdown_series(equity)
-                hist_scalar = dd_guard.compute_dd_guard_scalar(drawdown, max_dd=float(cfg.dd_guard_max_drawdown), floor=float(cfg.dd_guard_floor), recovery_halflife=int(cfg.dd_guard_recovery_halflife))
+                hist_scalar = dd_guard.compute_dd_guard_scalar(
+                    drawdown,
+                    max_dd=float(cfg.dd_guard_max_drawdown),
+                    floor=float(cfg.dd_guard_floor),
+                    recovery_halflife=int(cfg.dd_guard_recovery_halflife),
+                )
                 if len(hist_scalar) > 0:
                     last_scalar = float(hist_scalar.iloc[-1])
-            # prepare scalar series for test period as recovery toward 1.0 using halflife semantics
-            n_periods = 0
-            if data_context is not None and isinstance(data_context.get("test_df"), pd.DataFrame):
-                test_df = data_context.get("test_df")
-                if not test_df.empty:
-                    n_periods = len(test_df)
-            if n_periods > 0 and last_scalar < 0.999999:
-                halflife = max(1, int(cfg.dd_guard_recovery_halflife))
-                t = np.arange(1, n_periods + 1, dtype=float)
-                scalar_test = 1.0 - (1.0 - last_scalar) * (0.5 ** (t / float(halflife)))
-                # build weight schedule and apply scalar
-                weights_schedule = _constant_weight_schedule(final_weights, n_periods)
-                adjusted_schedule = dd_guard.apply_scalar_to_weights(weights_schedule, scalar_test)
-                dd_guard_info = {
-                    "enabled": True,
-                    "max_drawdown": float(cfg.dd_guard_max_drawdown),
-                    "floor": float(cfg.dd_guard_floor),
-                    "recovery_halflife": int(cfg.dd_guard_recovery_halflife),
-                    "history_scalar_last": float(last_scalar),
-                    "test_scalar_mean": float(np.mean(scalar_test)),
-                    "test_periods": int(n_periods),
-                }
+            dd_guard_last_scalar = float(last_scalar)
+            dd_guard_info["history_scalar_last"] = float(dd_guard_last_scalar)
         except Exception:
-            adjusted_schedule = None
+            pass
 
     # Stage 6: Backtest performance
-    if adjusted_schedule is not None:
+    if dd_guard_enabled and data_context is not None and dd_guard_last_scalar < 0.999999:
         try:
             ctx = data_context if data_context is not None else _load_data_context(cfg)
+            strategy_returns_include_costs = False
             if cfg.template_default_universe and isinstance(ctx.get("test_strategy_returns"), pd.DataFrame):
                 returns_df = (
                     ctx["test_strategy_returns"]
@@ -1206,6 +1202,22 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
                 returns_source = "buy_hold_pct_change"
             if returns_df.empty:
                 raise ValueError("test returns panel is empty")
+
+            n_periods = int(len(returns_df))
+            halflife = max(1, int(cfg.dd_guard_recovery_halflife))
+            t = np.arange(1, n_periods + 1, dtype=float)
+            scalar_test = 1.0 - (1.0 - float(dd_guard_last_scalar)) * (0.5 ** (t / float(halflife)))
+            weights_schedule = _constant_weight_schedule(final_weights, n_periods)
+            adjusted_schedule = dd_guard.apply_scalar_to_weights(weights_schedule, scalar_test)
+
+            dd_guard_info.update(
+                {
+                    "applied": True,
+                    "test_scalar_mean": float(np.mean(scalar_test)),
+                    "test_periods": int(n_periods),
+                }
+            )
+
             sim_fee = 0.0 if strategy_returns_include_costs else cfg.fee_rate
             sim_slippage = 0.0 if strategy_returns_include_costs else cfg.slippage_rate
             sim = run_return_equity_simulation(
