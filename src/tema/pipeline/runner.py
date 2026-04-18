@@ -5,6 +5,7 @@ from ..ensemble import DynamicEnsembleConfig, combine_stream_signals, compute_dy
 from ..online_learning import OnlineLogisticLearner
 from ..stress import evaluate_stress_scenarios
 from ..data import load_price_panel, split_train_test, split_panel_per_asset
+from ..data.quality import DataQualityConfig, DataQualityFailed, compute_data_quality_report
 from ..signals import resolve_signal_engine
 from ..portfolio import allocate_portfolio_weights
 from ..backtest import build_weight_schedule_from_signals, run_return_equity_simulation
@@ -223,6 +224,19 @@ def _annualized_expected_alphas_from_strategy_train_returns(train_strategy_retur
 
 
 def _load_data_context(cfg: BacktestConfig) -> dict:
+    def _maybe_quality_report(panel: pd.DataFrame) -> dict | None:
+        if not bool(getattr(cfg, "data_quality_enabled", False)):
+            return None
+        qcfg = DataQualityConfig(
+            max_nan_frac=float(getattr(cfg, "data_quality_max_nan_frac", 0.05)),
+            max_gap_days=float(getattr(cfg, "data_quality_max_gap_days", 7.0)),
+            min_price=float(getattr(cfg, "data_quality_min_price", 1e-12)),
+        )
+        report = compute_data_quality_report(panel, cfg=qcfg)
+        if bool(getattr(cfg, "data_quality_fail_fast", False)) and not bool(report.get("passed", False)):
+            raise DataQualityFailed(report)
+        return report
+
     max_assets, full_universe_override = _effective_data_max_assets(cfg)
     min_rows = 400 if cfg.template_default_universe else cfg.data_min_rows
     train_ratio = 0.60 if cfg.template_default_universe else cfg.data_train_ratio
@@ -319,7 +333,7 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
                     "shift_by": int(cfg.template_grid_shift_by),
                 }
 
-                return {
+                ctx = {
                     "price_df": price_df,
                     "train_df": train_df,
                     "test_df": test_df,
@@ -336,6 +350,8 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
                     "strategy_grid_diagnostics": strategy_grid_diagnostics,
                     "template_bl_weights": bl_weights.reindex(asset_universe).fillna(0.0),
                 }
+                ctx["data_quality_report"] = _maybe_quality_report(ctx["price_df"])
+                return ctx
 
     split_mode = "global"
     if cfg.template_default_universe:
@@ -422,7 +438,7 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
         )
         strategy_grid_diagnostics = {"mode": "legacy_single_signal_path"}
 
-    return {
+    ctx = {
         "price_df": price_df,
         "train_df": train_df,
         "test_df": test_df,
@@ -438,6 +454,8 @@ def _load_data_context(cfg: BacktestConfig) -> dict:
         "strategy_combo_selection": strategy_combo_selection,
         "strategy_grid_diagnostics": strategy_grid_diagnostics,
     }
+    ctx["data_quality_report"] = _maybe_quality_report(ctx["price_df"])
+    return ctx
 
 
 def _vol_proxy_from_train_window(
@@ -597,6 +615,8 @@ def _backtest_stage(
                 "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
             },
         }
+    except DataQualityFailed:
+        raise
     except Exception as exc:
         periods = 30
         returns = _synthetic_returns_from_alphas(effective_alphas, periods=periods)
@@ -804,6 +824,8 @@ def _portfolio_stage(
                 "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
                 "strategy_grid_diagnostics": ctx.get("strategy_grid_diagnostics", {}),
             }, returns_window_df.to_numpy(dtype=float)
+        except DataQualityFailed:
+            raise
         except Exception as exc:
             current = [0.30, 0.40, 0.30]
             candidate = [0.25, 0.45, 0.30]
@@ -1106,11 +1128,26 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
     os.makedirs(out_dir, exist_ok=True)
 
     data_context = None
+    data_quality_report = None
     if cfg.modular_data_signals_enabled or cfg.template_default_universe:
         try:
             data_context = _load_data_context(cfg)
+            if isinstance(data_context, dict):
+                data_quality_report = data_context.get("data_quality_report")
+        except DataQualityFailed as exc:
+            data_context = None
+            data_quality_report = exc.report if hasattr(exc, "report") else None
+            try:
+                if out_dir and data_quality_report is not None:
+                    path = os.path.join(out_dir, "data_quality.json")
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data_quality_report, f, indent=2)
+            except Exception:
+                pass
+            raise
         except Exception:
             data_context = None
+            data_quality_report = None
 
     # Stage 1: Portfolio (BL-like)
     current, candidate, expected_alphas, portfolio_info, train_returns_window = _portfolio_stage(cfg, data_context=data_context)
@@ -1277,6 +1314,8 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
     if ctx is None and (cfg.modular_data_signals_enabled or cfg.template_default_universe):
         try:
             ctx = _load_data_context(cfg)
+        except DataQualityFailed:
+            raise
         except Exception as exc:
             returns_csv_info["context_error"] = str(exc)
             ctx = None
@@ -1574,6 +1613,8 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
         "template_ml_meta_overlay": template_ml_meta_overlay,
         "regime_report_info": regime_report_info,
     }
+    if data_quality_report is not None:
+        artifacts["data_quality"] = data_quality_report
     if cfg.stress_enabled:
         artifacts["stress_scenarios"] = evaluate_stress_scenarios(
             returns=list(ensemble_alphas),

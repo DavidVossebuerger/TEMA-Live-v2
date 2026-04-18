@@ -5,6 +5,7 @@ from .loader import (
     load_price_panel,
     resolve_data_dir,
 )
+from .quality import DataQualityConfig, DataQualityFailed, compute_data_quality_report
 from .splitter import split_train_test, split_panel_per_asset
 
 __all__ = [
@@ -15,4 +16,7 @@ __all__ = [
     "load_price_panel",
     "split_train_test",
     "split_panel_per_asset",
+    "DataQualityConfig",
+    "DataQualityFailed",
+    "compute_data_quality_report",
 ]

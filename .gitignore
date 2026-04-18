@@ -16,4 +16,5 @@ merged_d1/
 # Session temp outputs
 .tmp_tema_progress.json
 outputs/smoke*/
+outputs/sweep*/
 
