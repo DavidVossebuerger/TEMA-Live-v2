@@ -2635,6 +2635,8 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
         "multi_horizon_blend_enabled": bool(getattr(cfg, "experimental_multi_horizon_blend_enabled", False)),
         "conformal_sizing_enabled": bool(getattr(cfg, "experimental_conformal_sizing_enabled", False)),
         "futuretesting_enabled": bool(getattr(cfg, "experimental_futuretesting_enabled", False)),
+        "futuretesting_method": str(getattr(cfg, "experimental_futuretesting_method", "stationary_bootstrap")),
+        "futuretesting_block_size": getattr(cfg, "experimental_futuretesting_block_size", None),
     }
     futuretesting_info = {"enabled": False}
     if experimental_modules["futuretesting_enabled"]:
@@ -2655,6 +2657,8 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
                         vals,
                         n_paths=int(getattr(cfg, "experimental_futuretesting_n_paths", 200)),
                         horizon=int(getattr(cfg, "experimental_futuretesting_horizon", 126)),
+                        method=str(getattr(cfg, "experimental_futuretesting_method", "stationary_bootstrap")),
+                        block_size=getattr(cfg, "experimental_futuretesting_block_size", None),
                         seed=int(getattr(cfg, "stress_seed", 42)),
                     )
                 else:

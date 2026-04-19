@@ -167,6 +167,8 @@ def run_return_equity_simulation(
     metrics["dynamic_trading_enabled"] = bool(dynamic_trading_enabled)
     metrics["dynamic_trading"] = dynamic_trading_info
     metrics["execution_backend"] = backend
+    if backend == "almgren_chriss":
+        metrics["execution_backend_model"] = "heuristic_partial_execution"
     return BacktestResult(
         periodic_returns=periodic_returns.tolist(),
         equity_curve=equity.tolist(),

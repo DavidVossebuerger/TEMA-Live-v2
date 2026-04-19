@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Heuristic partial-execution step inspired by Almgren-Chriss.
+
+This module does not implement the closed-form AC liquidation trajectory.
+It provides a deterministic, turnover-aware fill-rate approximation for
+single-step portfolio rebalancing in the backtest loop.
+"""
+
 import math
 from typing import Sequence
 
@@ -37,6 +44,11 @@ def apply_almgren_chriss_step(
     temporary_impact: float = 0.10,
     permanent_impact: float = 0.01,
 ) -> tuple[np.ndarray, dict]:
+    """Apply a single-step heuristic fill toward target weights.
+
+    The function name is kept for API compatibility, but this is an
+    AC-inspired heuristic and not the closed-form Almgren-Chriss solution.
+    """
     prev = np.asarray(prev_weights, dtype=float).reshape(-1)
     target = np.asarray(target_weights, dtype=float).reshape(-1)
     if prev.shape != target.shape:
@@ -54,6 +66,8 @@ def apply_almgren_chriss_step(
     )
     executed = prev + fill_rate * desired
     return executed, {
+        "model_name": "almgren_chriss_heuristic",
+        "is_closed_form": False,
         "fill_rate": float(fill_rate),
         "desired_turnover": desired_turnover,
         "volatility": float(volatility),
@@ -62,4 +76,3 @@ def apply_almgren_chriss_step(
         "temporary_impact": float(max(float(temporary_impact), 0.0)),
         "permanent_impact": float(max(float(permanent_impact), 0.0)),
     }
-

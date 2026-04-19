@@ -730,6 +730,8 @@ def run_modular(
     experimental_multi_horizon_blend_enabled: bool = False,
     experimental_conformal_sizing_enabled: bool = False,
     experimental_futuretesting_enabled: bool = False,
+    experimental_futuretesting_method: str = "stationary_bootstrap",
+    experimental_futuretesting_block_size: int | None = None,
     experimental_futuretesting_n_paths: int = 200,
     experimental_futuretesting_horizon: int = 126,
     template_default_universe: bool = False,
@@ -882,6 +884,8 @@ def run_modular(
         experimental_multi_horizon_blend_enabled=experimental_multi_horizon_blend_enabled,
         experimental_conformal_sizing_enabled=experimental_conformal_sizing_enabled,
         experimental_futuretesting_enabled=experimental_futuretesting_enabled,
+        experimental_futuretesting_method=experimental_futuretesting_method,
+        experimental_futuretesting_block_size=experimental_futuretesting_block_size,
         experimental_futuretesting_n_paths=experimental_futuretesting_n_paths,
         experimental_futuretesting_horizon=experimental_futuretesting_horizon,
         template_default_universe=template_default_universe,
@@ -1065,6 +1069,12 @@ def main(argv=None):
     p.add_argument("--experimental-multi-horizon-blend", action="store_true")
     p.add_argument("--experimental-conformal-sizing", action="store_true")
     p.add_argument("--experimental-futuretesting", action="store_true")
+    p.add_argument(
+        "--experimental-futuretesting-method",
+        choices=("stationary_bootstrap", "iid_bootstrap"),
+        default="stationary_bootstrap",
+    )
+    p.add_argument("--experimental-futuretesting-block-size", type=int, default=None)
     p.add_argument("--experimental-futuretesting-n-paths", type=int, default=200)
     p.add_argument("--experimental-futuretesting-horizon", type=int, default=126)
     p.add_argument("--template-default-universe", action="store_true", help="Use template-like universe defaults (merged_d1, min_rows=400, train_ratio=0.60, full asset set)")
@@ -1208,6 +1218,8 @@ def main(argv=None):
             experimental_multi_horizon_blend_enabled=args.experimental_multi_horizon_blend,
             experimental_conformal_sizing_enabled=args.experimental_conformal_sizing,
             experimental_futuretesting_enabled=args.experimental_futuretesting,
+            experimental_futuretesting_method=args.experimental_futuretesting_method,
+            experimental_futuretesting_block_size=args.experimental_futuretesting_block_size,
             experimental_futuretesting_n_paths=args.experimental_futuretesting_n_paths,
             experimental_futuretesting_horizon=args.experimental_futuretesting_horizon,
             template_default_universe=args.template_default_universe,

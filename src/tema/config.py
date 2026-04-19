@@ -242,6 +242,8 @@ class BacktestConfig:
     experimental_multi_horizon_blend_enabled: bool = False
     experimental_conformal_sizing_enabled: bool = False
     experimental_futuretesting_enabled: bool = False
+    experimental_futuretesting_method: str = "stationary_bootstrap"
+    experimental_futuretesting_block_size: Optional[int] = None
     experimental_futuretesting_n_paths: int = 200
     experimental_futuretesting_horizon: int = 126
 

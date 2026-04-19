@@ -83,6 +83,8 @@ def test_run_modular_wires_new_knobs(monkeypatch):
         experimental_multi_horizon_blend_enabled=True,
         experimental_conformal_sizing_enabled=True,
         experimental_futuretesting_enabled=True,
+        experimental_futuretesting_method="iid_bootstrap",
+        experimental_futuretesting_block_size=9,
         experimental_futuretesting_n_paths=321,
         experimental_futuretesting_horizon=77,
         cle_enabled=True,
@@ -177,6 +179,8 @@ def test_run_modular_wires_new_knobs(monkeypatch):
     assert cfg.experimental_multi_horizon_blend_enabled is True
     assert cfg.experimental_conformal_sizing_enabled is True
     assert cfg.experimental_futuretesting_enabled is True
+    assert cfg.experimental_futuretesting_method == "iid_bootstrap"
+    assert cfg.experimental_futuretesting_block_size == 9
     assert cfg.experimental_futuretesting_n_paths == 321
     assert cfg.experimental_futuretesting_horizon == 77
     assert cfg.cle_enabled is True
@@ -584,6 +588,10 @@ def test_main_passes_execution_and_experimental_knobs(monkeypatch):
             "--experimental-multi-horizon-blend",
             "--experimental-conformal-sizing",
             "--experimental-futuretesting",
+            "--experimental-futuretesting-method",
+            "iid_bootstrap",
+            "--experimental-futuretesting-block-size",
+            "9",
             "--experimental-futuretesting-n-paths",
             "321",
             "--experimental-futuretesting-horizon",
@@ -611,6 +619,8 @@ def test_main_passes_execution_and_experimental_knobs(monkeypatch):
     assert captured["kwargs"]["experimental_multi_horizon_blend_enabled"] is True
     assert captured["kwargs"]["experimental_conformal_sizing_enabled"] is True
     assert captured["kwargs"]["experimental_futuretesting_enabled"] is True
+    assert captured["kwargs"]["experimental_futuretesting_method"] == "iid_bootstrap"
+    assert captured["kwargs"]["experimental_futuretesting_block_size"] == 9
     assert captured["kwargs"]["experimental_futuretesting_n_paths"] == 321
     assert captured["kwargs"]["experimental_futuretesting_horizon"] == 77
 

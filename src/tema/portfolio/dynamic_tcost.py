@@ -32,8 +32,9 @@ def apply_dynamic_trading_path(
     min_trade_rate: float = 0.10,
     max_trade_rate: float = 1.0,
 ) -> tuple[np.ndarray, dict]:
-    """Apply a Gârleanu-Pedersen-style partial adjustment toward an "aim" portfolio.
+    """Apply a GP-inspired partial adjustment toward an "aim" portfolio.
 
+    This is a heuristic scheduler, not the Gârleanu-Pedersen closed form.
     The schedule remains deterministic and conservative:
     - aim_t = target_t + aim_multiplier * (target_t - target_{t-1})
     - executed_t = executed_{t-1} + trade_rate_t * (aim_t - executed_{t-1})
@@ -78,6 +79,8 @@ def apply_dynamic_trading_path(
 
     diagnostics = {
         "enabled": True,
+        "model_name": "gp_inspired_partial_adjustment",
+        "is_closed_form": False,
         "lambda_cost": lam,
         "aim_multiplier": aim_mult,
         "min_trade_rate": rate_floor,
