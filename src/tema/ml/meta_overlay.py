@@ -82,14 +82,64 @@ def _compute_metrics_arithmetic(returns: pd.Series, freq: int = 252) -> Dict[str
     }
 
 
-def _align_features_targets(feat: pd.DataFrame, ml: pd.Series) -> Tuple[np.ndarray, np.ndarray, pd.Index]:
+def _triple_barrier_binary_labels(
+    returns: pd.Series,
+    *,
+    horizon: int,
+    upper: float,
+    lower: float,
+) -> pd.Series:
+    r = pd.to_numeric(returns, errors="coerce").astype(float)
+    n = int(len(r))
+    labels = np.full((n,), np.nan, dtype=float)
+    h = max(int(horizon), 1)
+    up = max(float(upper), 0.0)
+    down = max(float(lower), 0.0)
+    values = r.to_numpy(dtype=float)
+    for i in range(n):
+        end = min(i + h, n - 1)
+        if end <= i:
+            continue
+        cum = 0.0
+        label = None
+        for j in range(i + 1, end + 1):
+            cum = (1.0 + cum) * (1.0 + float(values[j])) - 1.0
+            if cum >= up:
+                label = 1.0
+                break
+            if cum <= -down:
+                label = 0.0
+                break
+        if label is None:
+            label = 1.0 if cum > 0.0 else 0.0
+        labels[i] = label
+    return pd.Series(labels, index=r.index)
+
+
+def _align_features_targets(
+    feat: pd.DataFrame,
+    ml: pd.Series,
+    *,
+    cfg: BacktestConfig,
+) -> Tuple[np.ndarray, np.ndarray, pd.Index, str]:
     df = feat.copy()
     df["ml"] = ml
-    df["y"] = (df["ml"] > 0.0).astype(float)
+    label_mode = "sign"
+    if bool(getattr(cfg, "ml_meta_use_triple_barrier", False)):
+        label_mode = "triple_barrier"
+        df["y"] = _triple_barrier_binary_labels(
+            df["ml"],
+            horizon=int(getattr(cfg, "ml_meta_tb_horizon", 5)),
+            upper=float(getattr(cfg, "ml_meta_tb_upper", 0.01)),
+            lower=float(getattr(cfg, "ml_meta_tb_lower", 0.01)),
+        )
+    else:
+        df["y"] = (df["ml"] > 0.0).astype(float)
     df = df.dropna(subset=["ml"])
+    df = df.dropna(subset=["y"])
     y = df["y"].values
     X = df.drop(columns=["ml", "y"]).values
-    return X, y, df.index
+    return X, y, df.index, label_mode
 
 
 def _build_time_ordered_validation_folds(
@@ -157,8 +207,8 @@ def compute_ml_meta_overlay_series(
     feat_train = _make_features(baseline_train, ml_train, lags=lags, roll=roll)
     feat_test = _make_features(baseline_test, ml_test, lags=lags, roll=roll)
 
-    X_train, y_train, idx_train = _align_features_targets(feat_train, ml_train)
-    X_test, _y_dummy, idx_test = _align_features_targets(feat_test, ml_test)
+    X_train, y_train, idx_train, label_mode = _align_features_targets(feat_train, ml_train, cfg=cfg)
+    X_test, _y_dummy, idx_test, _ = _align_features_targets(feat_test, ml_test, cfg=cfg)
 
     if X_train.size == 0 or X_test.size == 0:
         zero_train = pd.Series(0.0, index=idx_train, name="exposure")
@@ -412,6 +462,7 @@ def compute_ml_meta_overlay_series(
         "chosen_floor": float(f_best),
         "train_ml_ann_vol": float(train_ml_ann_vol),
         "selection_mode": "computed_regularized" if computed_mode else "template_compatible",
+        "labeling_mode": label_mode,
         "selection": {k: (float(v) if isinstance(v, (int, float, np.floating)) else v) for k, v in best.items()},
     }
     if computed_mode:

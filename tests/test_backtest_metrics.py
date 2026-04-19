@@ -179,3 +179,55 @@ def test_template_backtest_uses_strategy_returns_without_double_costing():
     assert abs(perf["equity_final"] - float(expected.equity_curve[-1])) < 1e-12
     assert perf["source"]["returns_source"] == "strategy_test_returns"
     assert perf["source"]["strategy_returns_include_costs"] is True
+
+
+def test_dynamic_trading_reduces_turnover_proxy():
+    asset_returns = np.array(
+        [
+            [0.01, -0.01],
+            [-0.02, 0.02],
+            [0.03, -0.03],
+            [-0.01, 0.01],
+        ],
+        dtype=float,
+    )
+    # Alternate fully between assets to induce high turnover.
+    target_weights = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    base = run_return_equity_simulation(asset_returns, target_weights, freq="D")
+    dyn = run_return_equity_simulation(
+        asset_returns,
+        target_weights,
+        dynamic_trading_enabled=True,
+        dynamic_trading_lambda=1.0,
+        dynamic_trading_min_trade_rate=0.1,
+        dynamic_trading_max_trade_rate=0.7,
+        freq="D",
+    )
+    assert dyn.metrics["annualized_turnover"] < base.metrics["annualized_turnover"]
+    assert dyn.metrics["dynamic_trading_enabled"] is True
+
+
+def test_almgren_chriss_backend_runs_and_sets_backend_metric():
+    asset_returns = np.array([[0.01, -0.01], [0.02, -0.02], [-0.015, 0.015]], dtype=float)
+    target_weights = np.array([[0.6, 0.4], [0.4, 0.6], [0.7, 0.3]], dtype=float)
+    res = run_return_equity_simulation(
+        asset_returns,
+        target_weights,
+        execution_backend="almgren_chriss",
+        execution_ac_n_slices=4,
+        execution_ac_risk_aversion=1.1,
+        execution_ac_temporary_impact=0.08,
+        execution_ac_permanent_impact=0.02,
+        execution_ac_volatility_lookback=5,
+        freq="D",
+    )
+    assert np.all(np.isfinite(np.asarray(res.periodic_returns, dtype=float)))
+    assert res.metrics["execution_backend"] == "almgren_chriss"

@@ -79,6 +79,9 @@ def test_run_modular_validation_suite_writes_artifacts(tmp_path, monkeypatch):
     assert (out_dir / "bootstrap_baseline.json").exists()
     assert (out_dir / "bootstrap_ml.json").exists()
     assert (out_dir / "bootstrap_comparison_baseline_vs_ml.json").exists()
+    assert (out_dir / "probabilistic_sharpe_baseline.json").exists()
+    assert (out_dir / "probabilistic_sharpe_ml.json").exists()
+    assert (out_dir / "cpcv_report.json").exists()
     assert (out_dir / "mc_paths_summary.json").exists()
     assert (out_dir / "validation_summary.json").exists()
     assert (out_dir / "validation_charts" / "wf_sharpe_comparison.png").exists()
@@ -88,4 +91,6 @@ def test_run_modular_validation_suite_writes_artifacts(tmp_path, monkeypatch):
 
     summary = json.loads((out_dir / "validation_summary.json").read_text(encoding="utf-8"))
     assert summary["mc"]["n_paths"] == 500
+    assert "hard_gate" in summary
+    assert "passed" in summary["hard_gate"]
     assert "default_validation_suite" in res

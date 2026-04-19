@@ -6,6 +6,8 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 from .execution.costs import compute_transaction_cost
+from .execution.almgren_chriss import apply_almgren_chriss_step
+from .portfolio.dynamic_tcost import apply_dynamic_trading_path
 
 
 def _annualization_factor(freq: str) -> float:
@@ -63,6 +65,17 @@ def run_return_equity_simulation(
     spread_bps: float = 0.0,
     impact_coeff: float = 0.0,
     borrow_bps: float = 0.0,
+    dynamic_trading_enabled: bool = False,
+    dynamic_trading_lambda: float = 0.0,
+    dynamic_trading_aim_multiplier: float = 0.0,
+    dynamic_trading_min_trade_rate: float = 0.10,
+    dynamic_trading_max_trade_rate: float = 1.0,
+    execution_backend: str = "instant",
+    execution_ac_n_slices: int = 4,
+    execution_ac_risk_aversion: float = 1.0,
+    execution_ac_temporary_impact: float = 0.10,
+    execution_ac_permanent_impact: float = 0.01,
+    execution_ac_volatility_lookback: int = 20,
     freq: str = "D",
     risk_free_rate: float = 0.0,
 ) -> BacktestResult:
@@ -83,8 +96,41 @@ def run_return_equity_simulation(
         )
         return BacktestResult([], [], [], ann, metrics)
 
+    target_path = w
+    dynamic_trading_info = {"enabled": False}
+    if bool(dynamic_trading_enabled):
+        target_path, dynamic_trading_info = apply_dynamic_trading_path(
+            target_weights=target_path,
+            lambda_cost=dynamic_trading_lambda,
+            aim_multiplier=dynamic_trading_aim_multiplier,
+            min_trade_rate=dynamic_trading_min_trade_rate,
+            max_trade_rate=dynamic_trading_max_trade_rate,
+        )
+
     # Walk-forward-friendly execution: apply previous target weights to current period return.
-    executed = np.vstack([w[0], w[:-1]])
+    trade_targets = np.vstack([target_path[0], target_path[:-1]])
+    backend = str(execution_backend or "instant").lower()
+    if backend == "almgren_chriss":
+        executed = np.zeros_like(trade_targets)
+        executed[0] = trade_targets[0]
+        lookback = max(1, int(execution_ac_volatility_lookback))
+        for t in range(1, trade_targets.shape[0]):
+            lo = max(0, t - lookback + 1)
+            window = ret[lo : t + 1]
+            panel_std = np.std(window, axis=0, ddof=0) if window.size else np.array([0.0], dtype=float)
+            step_vol = float(np.nanmean(panel_std)) if panel_std.size else 0.0
+            executed[t], _ = apply_almgren_chriss_step(
+                prev_weights=executed[t - 1],
+                target_weights=trade_targets[t],
+                volatility=step_vol,
+                n_slices=execution_ac_n_slices,
+                risk_aversion=execution_ac_risk_aversion,
+                temporary_impact=execution_ac_temporary_impact,
+                permanent_impact=execution_ac_permanent_impact,
+            )
+    else:
+        executed = trade_targets
+
     periodic_returns = np.zeros(ret.shape[0], dtype=float)
     turnover_series = np.zeros(ret.shape[0], dtype=float)
     prev = executed[0]
@@ -118,6 +164,9 @@ def run_return_equity_simulation(
         ann,
         risk_free_rate=risk_free_rate,
     )
+    metrics["dynamic_trading_enabled"] = bool(dynamic_trading_enabled)
+    metrics["dynamic_trading"] = dynamic_trading_info
+    metrics["execution_backend"] = backend
     return BacktestResult(
         periodic_returns=periodic_returns.tolist(),
         equity_curve=equity.tolist(),

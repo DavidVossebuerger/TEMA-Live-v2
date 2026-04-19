@@ -63,6 +63,7 @@ def summarize_sweep(
             "ml_overfit_gap",
             "ml_win_vs_base",
             "ml_pass_threshold",
+            "hard_gate_passed",
             "runtime_s",
         ]
         if c in df.columns
@@ -133,6 +134,42 @@ def pick_best_config(
     idx = int(s.idxmax())
     row = summary_df.loc[idx].to_dict()
     # Convert numpy scalars to native
+    for k, v in list(row.items()):
+        if isinstance(v, (np.floating, np.integer)):
+            row[k] = v.item()
+    return row
+
+
+def pick_best_config_with_hard_gate(
+    summary_df: pd.DataFrame,
+    *,
+    score_col: str = "ml_test_sharpe_mean",
+    hard_gate_col: str = "hard_gate_passed_mean",
+) -> dict:
+    if summary_df is None or summary_df.empty:
+        return {}
+    if score_col not in summary_df.columns:
+        return {}
+
+    df = summary_df.copy()
+    score = pd.to_numeric(df[score_col], errors="coerce")
+    if score.isna().all():
+        return {}
+    df["_score"] = score
+    df = df[df["_score"].notna()]
+    if df.empty:
+        return {}
+
+    if hard_gate_col in df.columns:
+        gate_raw = pd.to_numeric(df[hard_gate_col], errors="coerce").fillna(0.0)
+        df["_hard_gate"] = (gate_raw >= 0.5).astype(int)
+    else:
+        df["_hard_gate"] = 0
+
+    ranked = df.sort_values(["_hard_gate", "_score"], ascending=[False, False], kind="mergesort")
+    row = ranked.iloc[0].to_dict()
+    row.pop("_score", None)
+    row.pop("_hard_gate", None)
     for k, v in list(row.items()):
         if isinstance(v, (np.floating, np.integer)):
             row[k] = v.item()

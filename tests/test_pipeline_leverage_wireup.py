@@ -331,6 +331,36 @@ def test_leverage_stage_online_calibration_is_seed_deterministic():
     assert info_1["online_calibration"]["learner_state"]["weights"] != info_other["online_calibration"]["learner_state"]["weights"]
 
 
+def test_leverage_stage_regime_mapping_hook_applies_without_cle():
+    cfg = BacktestConfig(
+        cle_enabled=False,
+        portfolio_regime_mapping_enabled=True,
+        portfolio_regime_mapping_mode="linear",
+        portfolio_regime_mapping_min_multiplier=0.5,
+        portfolio_regime_mapping_max_multiplier=1.5,
+    )
+    base_weights = [0.4, 0.35, 0.25]
+    expected_alphas = [0.02, -0.01, 0.015]
+    ml_info = {"scalar": [1.0, 1.0, 1.0], "decisions": [1.0, 1.0, 1.0]}
+    ensemble_info = {"weights": {"tema_base": 0.6, "ml_proxy": 0.4}, "regime_score": 1.0}
+
+    leveraged, info = pipeline_runner._leverage_stage(
+        cfg=cfg,
+        base_weights=base_weights,
+        expected_alphas=expected_alphas,
+        ml_info=ml_info,
+        ensemble_info=ensemble_info,
+        dd_guard_last_scalar=1.0,
+    )
+
+    assert info["cle_enabled"] is False
+    assert info["regime_mapping_enabled"] is True
+    assert info["applied"] is True
+    assert abs(info["regime_mapping_multiplier"] - 1.5) < 1e-12
+    assert abs(info["leverage_scalar"] - 1.5) < 1e-12
+    assert np.allclose(np.asarray(leveraged), 1.5 * np.asarray(base_weights), atol=1e-12)
+
+
 def test_pipeline_persists_online_calibration_artifact_when_enabled(tmp_path):
     data_dir = tmp_path / "merged_d1"
     _build_small_panel(data_dir)

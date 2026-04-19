@@ -992,6 +992,17 @@ def _backtest_stage(
             spread_bps=cfg.spread_bps,
             impact_coeff=cfg.impact_coeff,
             borrow_bps=cfg.borrow_bps,
+            dynamic_trading_enabled=bool(getattr(cfg, "dynamic_trading_enabled", False)),
+            dynamic_trading_lambda=float(getattr(cfg, "dynamic_trading_lambda", 0.0)),
+            dynamic_trading_aim_multiplier=float(getattr(cfg, "dynamic_trading_aim_multiplier", 0.0)),
+            dynamic_trading_min_trade_rate=float(getattr(cfg, "dynamic_trading_min_trade_rate", 0.10)),
+            dynamic_trading_max_trade_rate=float(getattr(cfg, "dynamic_trading_max_trade_rate", 1.0)),
+            execution_backend=str(getattr(cfg, "execution_backend", "instant")),
+            execution_ac_n_slices=int(getattr(cfg, "execution_ac_n_slices", 4)),
+            execution_ac_risk_aversion=float(getattr(cfg, "execution_ac_risk_aversion", 1.0)),
+            execution_ac_temporary_impact=float(getattr(cfg, "execution_ac_temporary_impact", 0.10)),
+            execution_ac_permanent_impact=float(getattr(cfg, "execution_ac_permanent_impact", 0.01)),
+            execution_ac_volatility_lookback=int(getattr(cfg, "execution_ac_volatility_lookback", 20)),
             freq=cfg.freq,
             risk_free_rate=float(getattr(cfg, "risk_free_rate", 0.0)),
         )
@@ -1007,6 +1018,10 @@ def _backtest_stage(
                 "assets": list(returns_df.columns),
                 "returns_source": returns_source,
                 "strategy_returns_include_costs": strategy_returns_include_costs,
+                "dynamic_trading_enabled": bool(getattr(cfg, "dynamic_trading_enabled", False)),
+                "execution_backend": str(getattr(cfg, "execution_backend", "instant")),
+                "template_rebalance_enabled": bool(getattr(cfg, "template_rebalance_enabled", False)),
+                "backtest_static_weights_in_template": bool(getattr(cfg, "backtest_static_weights_in_template", False)),
                 "split_mode": ctx.get("split_mode", "global"),
                 "strategy_grid_diagnostics": ctx.get("strategy_grid_diagnostics", {}),
                 "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
@@ -1027,6 +1042,17 @@ def _backtest_stage(
             spread_bps=cfg.spread_bps,
             impact_coeff=cfg.impact_coeff,
             borrow_bps=cfg.borrow_bps,
+            dynamic_trading_enabled=bool(getattr(cfg, "dynamic_trading_enabled", False)),
+            dynamic_trading_lambda=float(getattr(cfg, "dynamic_trading_lambda", 0.0)),
+            dynamic_trading_aim_multiplier=float(getattr(cfg, "dynamic_trading_aim_multiplier", 0.0)),
+            dynamic_trading_min_trade_rate=float(getattr(cfg, "dynamic_trading_min_trade_rate", 0.10)),
+            dynamic_trading_max_trade_rate=float(getattr(cfg, "dynamic_trading_max_trade_rate", 1.0)),
+            execution_backend=str(getattr(cfg, "execution_backend", "instant")),
+            execution_ac_n_slices=int(getattr(cfg, "execution_ac_n_slices", 4)),
+            execution_ac_risk_aversion=float(getattr(cfg, "execution_ac_risk_aversion", 1.0)),
+            execution_ac_temporary_impact=float(getattr(cfg, "execution_ac_temporary_impact", 0.10)),
+            execution_ac_permanent_impact=float(getattr(cfg, "execution_ac_permanent_impact", 0.01)),
+            execution_ac_volatility_lookback=int(getattr(cfg, "execution_ac_volatility_lookback", 20)),
             freq=cfg.freq,
             risk_free_rate=float(getattr(cfg, "risk_free_rate", 0.0)),
         )
@@ -1039,6 +1065,10 @@ def _backtest_stage(
                 "mode": "synthetic_fallback",
                 "rows": periods,
                 "assets": int(len(final_weights)),
+                "dynamic_trading_enabled": bool(getattr(cfg, "dynamic_trading_enabled", False)),
+                "execution_backend": str(getattr(cfg, "execution_backend", "instant")),
+                "template_rebalance_enabled": bool(getattr(cfg, "template_rebalance_enabled", False)),
+                "backtest_static_weights_in_template": bool(getattr(cfg, "backtest_static_weights_in_template", False)),
             },
         }
 
@@ -1206,6 +1236,9 @@ def _portfolio_stage(
                         tau=cfg.portfolio_bl_tau,
                         view_confidence=cfg.portfolio_bl_view_confidence,
                         cov_shrinkage=cfg.portfolio_cov_shrinkage,
+                        cov_backend=getattr(cfg, "portfolio_covariance_backend", "sample"),
+                        corr_backend=getattr(cfg, "portfolio_correlation_backend", "pearson"),
+                        gerber_threshold=float(getattr(cfg, "portfolio_gerber_threshold", 0.5)),
                         min_weight=cfg.portfolio_min_weight,
                         max_weight=cfg.portfolio_max_weight,
                     )
@@ -1611,12 +1644,17 @@ def _leverage_stage(
     dd_guard_last_scalar: float,
 ) -> tuple[list[float], dict]:
     base = np.asarray(base_weights, dtype=float).reshape(-1)
+    cle_enabled = bool(getattr(cfg, "cle_enabled", False))
+    regime_mapping_enabled = bool(getattr(cfg, "portfolio_regime_mapping_enabled", False))
     diagnostics = {
-        "enabled": bool(getattr(cfg, "cle_enabled", False)),
+        "enabled": bool(cle_enabled or regime_mapping_enabled),
+        "cle_enabled": cle_enabled,
+        "regime_mapping_enabled": regime_mapping_enabled,
         "applied": False,
         "base_leverage": 1.0,
         "confluence_score": 0.5,
         "leverage_scalar": 1.0,
+        "regime_mapping_multiplier": 1.0,
         "per_asset_leverage": [1.0 for _ in range(len(base))],
         "gate_context": {
             "event_blackout": False,
@@ -1628,7 +1666,7 @@ def _leverage_stage(
     if base.size == 0:
         diagnostics["reason"] = "empty_weights"
         return [], diagnostics
-    if not diagnostics["enabled"]:
+    if not cle_enabled and not regime_mapping_enabled:
         diagnostics["reason"] = "disabled"
         return base.tolist(), diagnostics
 
@@ -1655,6 +1693,33 @@ def _leverage_stage(
         regime_score = float(ensemble_data.get("regime_score", 0.0))
         if not np.isfinite(regime_score):
             regime_score = 0.0
+        regime_mapping_multiplier = 1.0
+        if regime_mapping_enabled:
+            mapping_score = float(np.clip(0.5 * (regime_score + 1.0), 0.0, 1.0))
+            mapping_cfg = ConfluenceMappingConfig(
+                mode=str(getattr(cfg, "portfolio_regime_mapping_mode", "linear")),
+                min_multiplier=float(getattr(cfg, "portfolio_regime_mapping_min_multiplier", 1.0)),
+                max_multiplier=float(getattr(cfg, "portfolio_regime_mapping_max_multiplier", 1.0)),
+                step_thresholds=tuple(
+                    float(x) for x in getattr(cfg, "portfolio_regime_mapping_step_thresholds", (0.30, 0.70))
+                ),
+                step_multipliers=tuple(
+                    float(x) for x in getattr(cfg, "portfolio_regime_mapping_step_multipliers", (1.0, 1.0, 1.0))
+                ),
+                kelly_gamma=float(getattr(cfg, "portfolio_regime_mapping_kelly_gamma", 2.0)),
+            )
+            regime_mapping_multiplier = float(
+                np.clip(
+                    compute_leverage(
+                        base_leverage=1.0,
+                        confluence_score=mapping_score,
+                        cfg=LeverageEngineConfig(mapping=mapping_cfg),
+                    ),
+                    0.0,
+                    np.inf,
+                )
+            )
+            diagnostics["regime_mapping_score"] = mapping_score
 
         decision_rate = float(np.mean(decisions)) if decisions.size else 1.0
         alpha_conviction = float(np.mean(np.abs(alpha_vec))) if alpha_vec.size else 0.0
@@ -1746,56 +1811,67 @@ def _leverage_stage(
             base_global_weights=global_signal_weights,
             base_per_asset_weights=per_asset_signal_weights,
         )
-        confluence_score, confluence_diag = compute_confluence_score(
-            global_signals,
-            weights=global_signal_weights,
-            cfg=confluence_cfg,
-            return_diagnostics=True,
-        )
-        base_leverage = max(0.0, float(getattr(cfg, "cle_base_leverage", 1.0)))
-        leverage_scalar, engine_diag = compute_leverage(
-            base_leverage=base_leverage,
-            confluence_score=confluence_score,
-            cfg=engine_cfg,
-            event_blackout=event_blackout,
-            spread_z=spread_z,
-            depth_percentile=depth_percentile,
-            correlation_alert=correlation_alert,
-            return_diagnostics=True,
-        )
-
-        per_asset_scores: list[float] = []
-        per_asset_raw_leverage: list[float] = []
-        for i in range(n_assets):
-            score_i = compute_confluence_score(
-                {
-                    "alpha": float(alpha_vec[i]),
-                    "ml_scalar_bias": float(ml_scalar[i] - 1.0),
-                    "decision": float(decisions[i]),
-                    "weight_magnitude": float(abs(base[i])),
-                },
-                weights=per_asset_signal_weights,
+        if cle_enabled:
+            confluence_score, confluence_diag = compute_confluence_score(
+                global_signals,
+                weights=global_signal_weights,
                 cfg=confluence_cfg,
+                return_diagnostics=True,
             )
-            lev_i = compute_leverage(
-                base_leverage=1.0,
-                confluence_score=score_i,
+            base_leverage = max(0.0, float(getattr(cfg, "cle_base_leverage", 1.0)))
+            leverage_scalar, engine_diag = compute_leverage(
+                base_leverage=base_leverage,
+                confluence_score=confluence_score,
                 cfg=engine_cfg,
                 event_blackout=event_blackout,
                 spread_z=spread_z,
                 depth_percentile=depth_percentile,
                 correlation_alert=correlation_alert,
+                return_diagnostics=True,
             )
-            per_asset_scores.append(float(score_i))
-            per_asset_raw_leverage.append(float(lev_i))
 
-        raw_arr = np.asarray(per_asset_raw_leverage, dtype=float)
-        raw_mean = float(np.mean(raw_arr)) if raw_arr.size else 1.0
-        if raw_mean <= 1e-12:
-            relative = np.ones((n_assets,), dtype=float)
+            per_asset_scores: list[float] = []
+            per_asset_raw_leverage: list[float] = []
+            for i in range(n_assets):
+                score_i = compute_confluence_score(
+                    {
+                        "alpha": float(alpha_vec[i]),
+                        "ml_scalar_bias": float(ml_scalar[i] - 1.0),
+                        "decision": float(decisions[i]),
+                        "weight_magnitude": float(abs(base[i])),
+                    },
+                    weights=per_asset_signal_weights,
+                    cfg=confluence_cfg,
+                )
+                lev_i = compute_leverage(
+                    base_leverage=1.0,
+                    confluence_score=score_i,
+                    cfg=engine_cfg,
+                    event_blackout=event_blackout,
+                    spread_z=spread_z,
+                    depth_percentile=depth_percentile,
+                    correlation_alert=correlation_alert,
+                )
+                per_asset_scores.append(float(score_i))
+                per_asset_raw_leverage.append(float(lev_i))
+
+            raw_arr = np.asarray(per_asset_raw_leverage, dtype=float)
+            raw_mean = float(np.mean(raw_arr)) if raw_arr.size else 1.0
+            if raw_mean <= 1e-12:
+                relative = np.ones((n_assets,), dtype=float)
+            else:
+                relative = raw_arr / raw_mean
         else:
-            relative = raw_arr / raw_mean
-        leveraged = base * float(leverage_scalar) * relative
+            confluence_score = 0.5
+            confluence_diag = {"mode": "disabled"}
+            base_leverage = 1.0
+            leverage_scalar = 1.0
+            engine_diag = {"mode": "disabled"}
+            per_asset_scores = [0.5 for _ in range(n_assets)]
+            relative = np.ones((n_assets,), dtype=float)
+
+        leverage_scalar = float(leverage_scalar) * float(regime_mapping_multiplier)
+        leveraged = base * leverage_scalar * relative
 
         diagnostics.update(
             {
@@ -1804,6 +1880,7 @@ def _leverage_stage(
                 "confluence_score": float(confluence_score),
                 "confluence_diagnostics": confluence_diag,
                 "leverage_scalar": float(leverage_scalar),
+                "regime_mapping_multiplier": float(regime_mapping_multiplier),
                 "per_asset_leverage": [float(x) for x in (float(leverage_scalar) * relative)],
                 "per_asset_confluence_scores": [float(x) for x in per_asset_scores],
                 "per_asset_relative_multiplier": [float(x) for x in relative],
@@ -1891,6 +1968,21 @@ def _compute_backtest_periodic_returns(
         target_weights=weights_path,
         fee_rate=sim_fee,
         slippage_rate=sim_slippage,
+        cost_model=cfg.cost_model,
+        spread_bps=cfg.spread_bps,
+        impact_coeff=cfg.impact_coeff,
+        borrow_bps=cfg.borrow_bps,
+        dynamic_trading_enabled=bool(getattr(cfg, "dynamic_trading_enabled", False)),
+        dynamic_trading_lambda=float(getattr(cfg, "dynamic_trading_lambda", 0.0)),
+        dynamic_trading_aim_multiplier=float(getattr(cfg, "dynamic_trading_aim_multiplier", 0.0)),
+        dynamic_trading_min_trade_rate=float(getattr(cfg, "dynamic_trading_min_trade_rate", 0.10)),
+        dynamic_trading_max_trade_rate=float(getattr(cfg, "dynamic_trading_max_trade_rate", 1.0)),
+        execution_backend=str(getattr(cfg, "execution_backend", "instant")),
+        execution_ac_n_slices=int(getattr(cfg, "execution_ac_n_slices", 4)),
+        execution_ac_risk_aversion=float(getattr(cfg, "execution_ac_risk_aversion", 1.0)),
+        execution_ac_temporary_impact=float(getattr(cfg, "execution_ac_temporary_impact", 0.10)),
+        execution_ac_permanent_impact=float(getattr(cfg, "execution_ac_permanent_impact", 0.01)),
+        execution_ac_volatility_lookback=int(getattr(cfg, "execution_ac_volatility_lookback", 20)),
         freq=cfg.freq,
         risk_free_rate=float(getattr(cfg, "risk_free_rate", 0.0)),
     )
@@ -1902,6 +1994,10 @@ def _compute_backtest_periodic_returns(
         "assets": list(returns_df.columns),
         "returns_source": returns_source,
         "strategy_returns_include_costs": strategy_returns_include_costs,
+        "dynamic_trading_enabled": bool(getattr(cfg, "dynamic_trading_enabled", False)),
+        "execution_backend": str(getattr(cfg, "execution_backend", "instant")),
+        "template_rebalance_enabled": bool(getattr(cfg, "template_rebalance_enabled", False)),
+        "backtest_static_weights_in_template": bool(getattr(cfg, "backtest_static_weights_in_template", False)),
         "split_mode": ctx.get("split_mode", "global"),
     }
     return returns_df.index, list(sim.periodic_returns), meta
@@ -1917,9 +2013,9 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
     if cfg is None:
         cfg = BacktestConfig()
     # Wire template-default-universe to backtest static-weight behavior by default.
-    # This is a configuration-level wiring (flag) to avoid ad-hoc conditionals.
+    # Optional template_rebalance_enabled lets template profile use dynamic schedules.
     if cfg.template_default_universe:
-        cfg.backtest_static_weights_in_template = True
+        cfg.backtest_static_weights_in_template = not bool(getattr(cfg, "template_rebalance_enabled", False))
 
     # sanitize run_id to avoid path traversal
     import re as _re
@@ -2091,6 +2187,17 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
                 spread_bps=cfg.spread_bps,
                 impact_coeff=cfg.impact_coeff,
                 borrow_bps=cfg.borrow_bps,
+                dynamic_trading_enabled=bool(getattr(cfg, "dynamic_trading_enabled", False)),
+                dynamic_trading_lambda=float(getattr(cfg, "dynamic_trading_lambda", 0.0)),
+                dynamic_trading_aim_multiplier=float(getattr(cfg, "dynamic_trading_aim_multiplier", 0.0)),
+                dynamic_trading_min_trade_rate=float(getattr(cfg, "dynamic_trading_min_trade_rate", 0.10)),
+                dynamic_trading_max_trade_rate=float(getattr(cfg, "dynamic_trading_max_trade_rate", 1.0)),
+                execution_backend=str(getattr(cfg, "execution_backend", "instant")),
+                execution_ac_n_slices=int(getattr(cfg, "execution_ac_n_slices", 4)),
+                execution_ac_risk_aversion=float(getattr(cfg, "execution_ac_risk_aversion", 1.0)),
+                execution_ac_temporary_impact=float(getattr(cfg, "execution_ac_temporary_impact", 0.10)),
+                execution_ac_permanent_impact=float(getattr(cfg, "execution_ac_permanent_impact", 0.01)),
+                execution_ac_volatility_lookback=int(getattr(cfg, "execution_ac_volatility_lookback", 20)),
                 freq=cfg.freq,
                 risk_free_rate=float(getattr(cfg, "risk_free_rate", 0.0)),
             )
@@ -2106,6 +2213,10 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
                     "assets": list(returns_df.columns),
                     "returns_source": returns_source,
                     "strategy_returns_include_costs": strategy_returns_include_costs,
+                    "dynamic_trading_enabled": bool(getattr(cfg, "dynamic_trading_enabled", False)),
+                    "execution_backend": str(getattr(cfg, "execution_backend", "instant")),
+                    "template_rebalance_enabled": bool(getattr(cfg, "template_rebalance_enabled", False)),
+                    "backtest_static_weights_in_template": bool(getattr(cfg, "backtest_static_weights_in_template", False)),
                     "split_mode": ctx.get("split_mode", "global"),
                     "strategy_grid_diagnostics": ctx.get("strategy_grid_diagnostics", {}),
                     "strategy_combo_selection": ctx.get("strategy_combo_selection", []),
@@ -2520,6 +2631,37 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
             + ", ".join(benchmark_injection_sources)
         )
 
+    experimental_modules = {
+        "multi_horizon_blend_enabled": bool(getattr(cfg, "experimental_multi_horizon_blend_enabled", False)),
+        "conformal_sizing_enabled": bool(getattr(cfg, "experimental_conformal_sizing_enabled", False)),
+        "futuretesting_enabled": bool(getattr(cfg, "experimental_futuretesting_enabled", False)),
+    }
+    futuretesting_info = {"enabled": False}
+    if experimental_modules["futuretesting_enabled"]:
+        futuretesting_info = {"enabled": True, "skipped": True, "reason": "baseline_returns_missing"}
+        try:
+            baseline_path = returns_csv_info.get("baseline_path")
+            if baseline_path and os.path.exists(str(baseline_path)):
+                from ..validation.futuretesting import run_futuretesting
+
+                baseline_df = pd.read_csv(str(baseline_path))
+                col = "portfolio_return" if "portfolio_return" in baseline_df.columns else None
+                if col is None:
+                    fallback_cols = [c for c in baseline_df.columns if c != "datetime"]
+                    col = fallback_cols[0] if fallback_cols else None
+                if col is not None:
+                    vals = pd.to_numeric(baseline_df[col], errors="coerce").dropna().to_numpy(dtype=float)
+                    futuretesting_info = run_futuretesting(
+                        vals,
+                        n_paths=int(getattr(cfg, "experimental_futuretesting_n_paths", 200)),
+                        horizon=int(getattr(cfg, "experimental_futuretesting_horizon", 126)),
+                        seed=int(getattr(cfg, "stress_seed", 42)),
+                    )
+                else:
+                    futuretesting_info = {"enabled": True, "skipped": True, "reason": "baseline_column_missing"}
+        except Exception as exc:
+            futuretesting_info = {"enabled": True, "skipped": True, "error": str(exc)}
+
     # Stage 7: Reporting artifacts
     cle_report = build_cle_report(leverage_info)
     artifacts = {
@@ -2540,6 +2682,8 @@ def run_pipeline(run_id: Optional[str] = None, cfg: Optional[BacktestConfig] = N
         "template_ml_overlay": template_ml_overlay,
         "template_ml_meta_overlay": template_ml_meta_overlay,
         "regime_report_info": regime_report_info,
+        "experimental_modules": experimental_modules,
+        "futuretesting": futuretesting_info,
     }
     cle_online_calibration = leverage_info.get("online_calibration") if isinstance(leverage_info, dict) else None
     if isinstance(cle_online_calibration, dict) and bool(cle_online_calibration.get("enabled", False)):

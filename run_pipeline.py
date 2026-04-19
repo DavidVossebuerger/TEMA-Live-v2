@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent
 # Ensure src is on sys.path so "tema" package can be imported
 sys.path.insert(0, str(ROOT / "src"))
 from tema.validation.manifest import MANIFEST_SCHEMA_VERSION
+from tema.ml.cpp_profile import resolve_cpp_hmm_profile, available_cpp_hmm_profiles
 
 
 def _extract_legacy_performance(
@@ -197,11 +198,23 @@ def _run_default_validation_suite(
     oos_min_sharpe: float | None,
     oos_max_drawdown: float | None,
     oos_max_turnover: float | None,
+    oos_min_calmar: float | None,
+    psr_threshold: float | None,
+    dsr_threshold: float | None,
+    pbo_max: float | None,
+    cpcv_n_groups: int,
+    cpcv_n_test_groups: int,
+    cpcv_purge_groups: int,
+    cpcv_embargo_groups: int,
+    cpcv_max_splits: int | None,
+    hard_fail: bool,
     charts_enabled: bool,
 ) -> dict:
     from tema.stress import sample_scenario_paths
     from tema.validation.bootstrap import bootstrap_compare_returns, bootstrap_metric_confidence_intervals
+    from tema.validation.cpcv import evaluate_cpcv_strategies, generate_cpcv_splits
     from tema.validation.oos import validate_oos_gates
+    from tema.validation.probabilistic import deflated_sharpe_ratio, probabilistic_sharpe_ratio
     from tema.validation.walkforward import run_walkforward_on_series
 
     out_dir = Path(run_result["out_dir"])
@@ -247,6 +260,7 @@ def _run_default_validation_suite(
         min_sharpe=oos_min_sharpe,
         max_drawdown=oos_max_drawdown,
         max_turnover=oos_max_turnover,
+        min_calmar=oos_min_calmar,
     )
     _write_json(out_dir / "oos_report.json", oos_report)
 
@@ -258,9 +272,24 @@ def _run_default_validation_suite(
         block_size=20,
     )
     _write_json(out_dir / "bootstrap_baseline.json", baseline_bootstrap)
+    baseline_probabilistic = {
+        "psr": probabilistic_sharpe_ratio(
+            returns=baseline_series.to_numpy(dtype=float),
+            sr_benchmark=0.0,
+            annualization_factor=252.0,
+        ),
+        "dsr": deflated_sharpe_ratio(
+            returns=baseline_series.to_numpy(dtype=float),
+            n_trials=max(2, int(cpcv_n_groups)),
+            sr_mean=0.0,
+            annualization_factor=252.0,
+        ),
+    }
+    _write_json(out_dir / "probabilistic_sharpe_baseline.json", baseline_probabilistic)
 
     ml_bootstrap = None
     bootstrap_comparison = None
+    ml_probabilistic = None
     if ml_series is not None:
         ml_bootstrap = bootstrap_metric_confidence_intervals(
             returns=ml_series.to_numpy(dtype=float),
@@ -280,6 +309,65 @@ def _run_default_validation_suite(
         )
         _write_json(out_dir / "bootstrap_ml.json", ml_bootstrap)
         _write_json(out_dir / "bootstrap_comparison_baseline_vs_ml.json", bootstrap_comparison)
+        ml_probabilistic = {
+            "psr": probabilistic_sharpe_ratio(
+                returns=ml_series.to_numpy(dtype=float),
+                sr_benchmark=0.0,
+                annualization_factor=252.0,
+            ),
+            "dsr": deflated_sharpe_ratio(
+                returns=ml_series.to_numpy(dtype=float),
+                n_trials=max(2, int(cpcv_n_groups)),
+                sr_mean=0.0,
+                annualization_factor=252.0,
+            ),
+        }
+        _write_json(out_dir / "probabilistic_sharpe_ml.json", ml_probabilistic)
+
+    cpcv_report: dict
+    cpcv_series: dict[str, pd.Series] = {"baseline": baseline_series}
+    if ml_series is not None:
+        cpcv_series["ml"] = ml_series
+    ml_meta_path = _resolve_returns_path("portfolio_test_returns_ml_meta.csv", "ml_meta_path")
+    if ml_meta_path is not None:
+        try:
+            cpcv_series["ml_meta"] = _load_returns_series(ml_meta_path, preferred_col="portfolio_return_ml_meta")
+        except (FileNotFoundError, ValueError):
+            pass
+
+    cpcv_df = pd.concat(cpcv_series, axis=1).dropna(how="all")
+    cpcv_df.columns = [str(c) for c in cpcv_df.columns]
+    if cpcv_df.shape[1] < 2 or cpcv_df.shape[0] < max(int(cpcv_n_groups), 20):
+        cpcv_report = {
+            "skipped": True,
+            "reason": "insufficient_series_or_rows",
+            "n_rows": int(cpcv_df.shape[0]),
+            "n_strategies": int(cpcv_df.shape[1]),
+        }
+    else:
+        cpcv_splits = generate_cpcv_splits(
+            index=cpcv_df.index,
+            n_groups=int(cpcv_n_groups),
+            n_test_groups=int(cpcv_n_test_groups),
+            purge_groups=int(cpcv_purge_groups),
+            embargo_groups=int(cpcv_embargo_groups),
+            max_splits=cpcv_max_splits,
+            seed=42,
+        )
+        cpcv_report = evaluate_cpcv_strategies(
+            returns_df=cpcv_df,
+            splits=cpcv_splits,
+            annualization_factor=252.0,
+            metric="sharpe",
+        )
+        cpcv_report["split_generation"] = {
+            "n_groups": int(cpcv_n_groups),
+            "n_test_groups": int(cpcv_n_test_groups),
+            "purge_groups": int(cpcv_purge_groups),
+            "embargo_groups": int(cpcv_embargo_groups),
+            "n_splits_generated": int(len(cpcv_splits)),
+        }
+    _write_json(out_dir / "cpcv_report.json", cpcv_report)
 
     mc_paths = sample_scenario_paths(
         baseline_series.to_numpy(dtype=float),
@@ -410,8 +498,67 @@ def _run_default_validation_suite(
         "bootstrap_baseline_metrics": baseline_bootstrap["metrics"],
         "bootstrap_ml_metrics": (ml_bootstrap["metrics"] if ml_bootstrap is not None else None),
         "bootstrap_comparison": bootstrap_comparison,
+        "probabilistic_baseline": baseline_probabilistic,
+        "probabilistic_ml": ml_probabilistic,
+        "cpcv": cpcv_report,
         "mc": mc_summary,
         "charts": charts,
+    }
+    target_prob = ml_probabilistic if ml_probabilistic is not None else baseline_probabilistic
+    target_psr = (
+        float(target_prob["psr"]["psr"])
+        if isinstance(target_prob, dict)
+        and isinstance(target_prob.get("psr"), dict)
+        and isinstance(target_prob["psr"].get("psr"), (int, float))
+        else None
+    )
+    target_dsr = (
+        float(target_prob["dsr"]["dsr"])
+        if isinstance(target_prob, dict)
+        and isinstance(target_prob.get("dsr"), dict)
+        and isinstance(target_prob["dsr"].get("dsr"), (int, float))
+        else None
+    )
+    cpcv_pbo = (
+        float(cpcv_report["pbo"]["pbo"])
+        if isinstance(cpcv_report, dict)
+        and isinstance(cpcv_report.get("pbo"), dict)
+        and isinstance(cpcv_report["pbo"].get("pbo"), (int, float))
+        else None
+    )
+    hard_gate_checks = {
+        "oos_passed": bool(oos_report.get("passed", False)),
+        "psr_threshold": (
+            True
+            if psr_threshold is None or target_psr is None
+            else bool(target_psr >= float(psr_threshold))
+        ),
+        "dsr_threshold": (
+            True
+            if dsr_threshold is None or target_dsr is None
+            else bool(target_dsr >= float(dsr_threshold))
+        ),
+        "pbo_max": (
+            True
+            if pbo_max is None or cpcv_pbo is None
+            else bool(cpcv_pbo <= float(pbo_max))
+        ),
+    }
+    hard_gate_passed = bool(all(hard_gate_checks.values()))
+    summary["hard_gate"] = {
+        "passed": hard_gate_passed,
+        "checks": hard_gate_checks,
+        "thresholds": {
+            "psr_threshold": psr_threshold,
+            "dsr_threshold": dsr_threshold,
+            "pbo_max": pbo_max,
+        },
+        "values": {
+            "target_psr": target_psr,
+            "target_dsr": target_dsr,
+            "pbo": cpcv_pbo,
+            "target_series": ("ml" if ml_probabilistic is not None else "baseline"),
+        },
     }
     summary_path = out_dir / "validation_summary.json"
     _write_json(summary_path, summary)
@@ -425,14 +572,20 @@ def _run_default_validation_suite(
             "bootstrap_baseline",
             "bootstrap_ml",
             "bootstrap_comparison_baseline_vs_ml",
+            "probabilistic_sharpe_baseline",
+            "probabilistic_sharpe_ml",
+            "cpcv_report",
             "mc_paths_summary",
             "validation_summary",
         ],
     )
+    if bool(hard_fail) and not hard_gate_passed:
+        raise ValueError("default validation hard gate failed")
     return {
         "summary_path": str(summary_path),
         "charts": charts,
         "oos_passed": bool(oos_report.get("passed")),
+        "validation_hard_gate_passed": hard_gate_passed,
         "mc_n_paths": int(mc_n_paths),
         "bootstrap_n_samples": int(bootstrap_n_samples),
     }
@@ -506,6 +659,16 @@ def run_modular(
     validation_oos_min_sharpe: float | None = 0.5,
     validation_oos_max_drawdown: float | None = 0.25,
     validation_oos_max_turnover: float | None = 5.0,
+    validation_oos_min_calmar: float | None = None,
+    validation_psr_threshold: float | None = 0.95,
+    validation_dsr_threshold: float | None = 0.80,
+    validation_pbo_max: float | None = 0.50,
+    validation_cpcv_n_groups: int = 10,
+    validation_cpcv_n_test_groups: int = 2,
+    validation_cpcv_purge_groups: int = 1,
+    validation_cpcv_embargo_groups: int = 1,
+    validation_cpcv_max_splits: int | None = 256,
+    validation_hard_fail: bool = False,
     modular_data_signals_enabled: bool = False,
     modular_portfolio_enabled: bool | None = None,
     data_path: str | None = None,
@@ -513,21 +676,67 @@ def run_modular(
     ml_modular_path_enabled: bool = False,
     ml_template_overlay: bool | None = None,
     ml_meta_overlay: bool | None = None,
+    ml_meta_use_triple_barrier: bool = False,
+    ml_meta_tb_horizon: int = 5,
+    ml_meta_tb_upper: float = 0.01,
+    ml_meta_tb_lower: float = 0.01,
     ml_probability_threshold: float = 0.0,
+    ml_feature_fracdiff_enabled: bool = False,
+    ml_feature_fracdiff_order: float = 0.4,
+    ml_feature_fracdiff_threshold: float = 1e-5,
+    ml_feature_fracdiff_max_terms: int = 256,
+    ml_feature_har_rv_enabled: bool = False,
+    ml_feature_har_rv_windows: tuple[int, ...] = (1, 5, 22),
+    ml_feature_har_rv_use_log: bool = True,
     data_max_assets: int = 3,
     data_full_universe_for_parity: bool = True,
     portfolio_method: str = "bl",
     portfolio_risk_aversion: float = 2.5,
+    portfolio_cov_shrinkage: float = 0.15,
+    portfolio_covariance_backend: str = "sample",
+    portfolio_correlation_backend: str = "pearson",
+    portfolio_gerber_threshold: float = 0.5,
     portfolio_bl_tau: float = 0.05,
     portfolio_bl_view_confidence: float = 0.65,
     portfolio_bl_omega_scale: float = 0.25,
     portfolio_bl_max_weight: float = 0.15,
+    portfolio_regime_mapping_enabled: bool = False,
+    portfolio_regime_mapping_mode: str = "linear",
+    portfolio_regime_mapping_min_multiplier: float = 1.0,
+    portfolio_regime_mapping_max_multiplier: float = 1.0,
+    portfolio_regime_mapping_step_thresholds: tuple[float, ...] = (0.30, 0.70),
+    portfolio_regime_mapping_step_multipliers: tuple[float, ...] = (1.0, 1.0, 1.0),
+    portfolio_regime_mapping_kelly_gamma: float = 2.0,
     ml_hmm_scalar_floor: float = 0.30,
     ml_hmm_scalar_ceiling: float = 1.50,
     vol_target_apply_to_ml: bool = False,
+    fee_rate: float = 0.0005,
+    slippage_rate: float = 0.0005,
+    cost_model: str = "simple",
+    spread_bps: float = 0.0,
+    impact_coeff: float = 0.0,
+    borrow_bps: float = 0.0,
+    dynamic_trading_enabled: bool = False,
+    dynamic_trading_lambda: float = 0.0,
+    dynamic_trading_aim_multiplier: float = 0.0,
+    dynamic_trading_min_trade_rate: float = 0.10,
+    dynamic_trading_max_trade_rate: float = 1.0,
+    execution_backend: str = "instant",
+    execution_ac_n_slices: int = 4,
+    execution_ac_risk_aversion: float = 1.0,
+    execution_ac_temporary_impact: float = 0.10,
+    execution_ac_permanent_impact: float = 0.01,
+    execution_ac_volatility_lookback: int = 20,
+    experimental_multi_horizon_blend_enabled: bool = False,
+    experimental_conformal_sizing_enabled: bool = False,
+    experimental_futuretesting_enabled: bool = False,
+    experimental_futuretesting_n_paths: int = 200,
+    experimental_futuretesting_horizon: int = 126,
     template_default_universe: bool = False,
+    template_rebalance_enabled: bool = False,
     template_use_precomputed_artifacts: bool = True,
     ml_meta_comparator_use_benchmark_csv: bool = False,
+    cpp_hmm_profile: str | None = None,
     cle_enabled: bool = False,
     cle_use_external_proxies: bool = False,
     cle_mode: str = "confluence_blend",
@@ -586,7 +795,9 @@ def run_modular(
         else (True if template_default_universe and ml_enabled else False)
     )
     effective_ml_meta_overlay = ml_meta_overlay if ml_meta_overlay is not None else False
-    effective_modular_data_signals_enabled = bool(modular_data_signals_enabled or default_validation_suite_enabled)
+    effective_modular_data_signals_enabled = bool(
+        modular_data_signals_enabled or default_validation_suite_enabled or template_rebalance_enabled
+    )
     effective_stress_enabled = bool(stress_enabled or default_validation_suite_enabled)
     effective_stress_n_paths = (
         int(max(stress_n_paths, validation_mc_n_paths))
@@ -598,6 +809,9 @@ def run_modular(
         if default_validation_suite_enabled
         else int(stress_horizon)
     )
+    profile_overrides: dict[str, float | int] = {}
+    if cpp_hmm_profile:
+        profile_overrides = resolve_cpp_hmm_profile(cpp_hmm_profile)
 
     cfg = BacktestConfig(
         stress_enabled=effective_stress_enabled,
@@ -614,21 +828,67 @@ def run_modular(
         ml_modular_path_enabled=ml_modular_path_enabled,
         ml_template_overlay_enabled=effective_ml_template_overlay,
         ml_meta_overlay_enabled=effective_ml_meta_overlay,
+        ml_meta_use_triple_barrier=ml_meta_use_triple_barrier,
+        ml_meta_tb_horizon=ml_meta_tb_horizon,
+        ml_meta_tb_upper=ml_meta_tb_upper,
+        ml_meta_tb_lower=ml_meta_tb_lower,
         ml_probability_threshold=ml_probability_threshold,
+        ml_feature_fracdiff_enabled=ml_feature_fracdiff_enabled,
+        ml_feature_fracdiff_order=ml_feature_fracdiff_order,
+        ml_feature_fracdiff_threshold=ml_feature_fracdiff_threshold,
+        ml_feature_fracdiff_max_terms=ml_feature_fracdiff_max_terms,
+        ml_feature_har_rv_enabled=ml_feature_har_rv_enabled,
+        ml_feature_har_rv_windows=ml_feature_har_rv_windows,
+        ml_feature_har_rv_use_log=ml_feature_har_rv_use_log,
         data_max_assets=data_max_assets,
         data_full_universe_for_parity=data_full_universe_for_parity,
         portfolio_method=portfolio_method,
         portfolio_risk_aversion=portfolio_risk_aversion,
+        portfolio_cov_shrinkage=portfolio_cov_shrinkage,
+        portfolio_covariance_backend=portfolio_covariance_backend,
+        portfolio_correlation_backend=portfolio_correlation_backend,
+        portfolio_gerber_threshold=portfolio_gerber_threshold,
         portfolio_bl_tau=portfolio_bl_tau,
         portfolio_bl_view_confidence=portfolio_bl_view_confidence,
         portfolio_bl_omega_scale=portfolio_bl_omega_scale,
         portfolio_bl_max_weight=portfolio_bl_max_weight,
+        portfolio_regime_mapping_enabled=portfolio_regime_mapping_enabled,
+        portfolio_regime_mapping_mode=portfolio_regime_mapping_mode,
+        portfolio_regime_mapping_min_multiplier=portfolio_regime_mapping_min_multiplier,
+        portfolio_regime_mapping_max_multiplier=portfolio_regime_mapping_max_multiplier,
+        portfolio_regime_mapping_step_thresholds=portfolio_regime_mapping_step_thresholds,
+        portfolio_regime_mapping_step_multipliers=portfolio_regime_mapping_step_multipliers,
+        portfolio_regime_mapping_kelly_gamma=portfolio_regime_mapping_kelly_gamma,
         ml_hmm_scalar_floor=ml_hmm_scalar_floor,
         ml_hmm_scalar_ceiling=ml_hmm_scalar_ceiling,
         vol_target_apply_to_ml=vol_target_apply_to_ml,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        cost_model=cost_model,
+        spread_bps=spread_bps,
+        impact_coeff=impact_coeff,
+        borrow_bps=borrow_bps,
+        dynamic_trading_enabled=dynamic_trading_enabled,
+        dynamic_trading_lambda=dynamic_trading_lambda,
+        dynamic_trading_aim_multiplier=dynamic_trading_aim_multiplier,
+        dynamic_trading_min_trade_rate=dynamic_trading_min_trade_rate,
+        dynamic_trading_max_trade_rate=dynamic_trading_max_trade_rate,
+        execution_backend=execution_backend,
+        execution_ac_n_slices=execution_ac_n_slices,
+        execution_ac_risk_aversion=execution_ac_risk_aversion,
+        execution_ac_temporary_impact=execution_ac_temporary_impact,
+        execution_ac_permanent_impact=execution_ac_permanent_impact,
+        execution_ac_volatility_lookback=execution_ac_volatility_lookback,
+        experimental_multi_horizon_blend_enabled=experimental_multi_horizon_blend_enabled,
+        experimental_conformal_sizing_enabled=experimental_conformal_sizing_enabled,
+        experimental_futuretesting_enabled=experimental_futuretesting_enabled,
+        experimental_futuretesting_n_paths=experimental_futuretesting_n_paths,
+        experimental_futuretesting_horizon=experimental_futuretesting_horizon,
         template_default_universe=template_default_universe,
+        template_rebalance_enabled=template_rebalance_enabled,
         template_use_precomputed_artifacts=template_use_precomputed_artifacts,
         ml_meta_comparator_use_benchmark_csv=ml_meta_comparator_use_benchmark_csv,
+        cpp_hmm_profile=cpp_hmm_profile,
         strict_independent_mode=strict_independent_mode,
         cle_enabled=cle_enabled,
         cle_use_external_proxies=cle_use_external_proxies,
@@ -651,6 +911,7 @@ def run_modular(
         cle_online_calibration_window=cle_online_calibration_window,
         cle_online_calibration_learning_rate=cle_online_calibration_learning_rate,
         cle_online_calibration_l2=cle_online_calibration_l2,
+        **profile_overrides,
     )
     res = rp(run_id=run_id, cfg=cfg, out_root=out_root)
     bridge_enabled = bool(parity_metrics_bridge or os.environ.get("TEMA_PARITY_METRICS_BRIDGE", "0") == "1")
@@ -670,6 +931,16 @@ def run_modular(
             oos_min_sharpe=validation_oos_min_sharpe,
             oos_max_drawdown=validation_oos_max_drawdown,
             oos_max_turnover=validation_oos_max_turnover,
+            oos_min_calmar=validation_oos_min_calmar,
+            psr_threshold=validation_psr_threshold,
+            dsr_threshold=validation_dsr_threshold,
+            pbo_max=validation_pbo_max,
+            cpcv_n_groups=int(validation_cpcv_n_groups),
+            cpcv_n_test_groups=int(validation_cpcv_n_test_groups),
+            cpcv_purge_groups=int(validation_cpcv_purge_groups),
+            cpcv_embargo_groups=int(validation_cpcv_embargo_groups),
+            cpcv_max_splits=validation_cpcv_max_splits,
+            hard_fail=bool(validation_hard_fail),
             charts_enabled=validation_graphs_enabled,
         )
     return res
@@ -683,6 +954,19 @@ def _parse_csv_floats(value: str) -> tuple[float, ...]:
         return tuple(float(token) for token in tokens)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("expected comma-separated float values") from exc
+
+
+def _parse_csv_ints(value: str) -> tuple[int, ...]:
+    tokens = [token.strip() for token in str(value).split(",")]
+    if not tokens or any(token == "" for token in tokens):
+        raise argparse.ArgumentTypeError("expected comma-separated integer values")
+    try:
+        values = tuple(int(token) for token in tokens)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected comma-separated integer values") from exc
+    if any(v <= 0 for v in values):
+        raise argparse.ArgumentTypeError("all integer values must be > 0")
+    return values
 
 
 def main(argv=None):
@@ -702,6 +986,16 @@ def main(argv=None):
     p.add_argument("--validation-oos-min-sharpe", type=float, default=0.5)
     p.add_argument("--validation-oos-max-drawdown", type=float, default=0.25)
     p.add_argument("--validation-oos-max-turnover", type=float, default=5.0)
+    p.add_argument("--validation-oos-min-calmar", type=float, default=None)
+    p.add_argument("--validation-psr-threshold", type=float, default=0.95)
+    p.add_argument("--validation-dsr-threshold", type=float, default=0.80)
+    p.add_argument("--validation-pbo-max", type=float, default=0.50)
+    p.add_argument("--validation-cpcv-n-groups", type=int, default=10)
+    p.add_argument("--validation-cpcv-n-test-groups", type=int, default=2)
+    p.add_argument("--validation-cpcv-purge-groups", type=int, default=1)
+    p.add_argument("--validation-cpcv-embargo-groups", type=int, default=1)
+    p.add_argument("--validation-cpcv-max-splits", type=int, default=256)
+    p.add_argument("--validation-hard-fail", action="store_true")
     p.add_argument("--modular-data-signals", action="store_true")
     p.add_argument("--modular-portfolio", action="store_true", default=None)
     p.add_argument("--data-path", default=None)
@@ -709,19 +1003,76 @@ def main(argv=None):
     p.add_argument("--ml-modular-path", action="store_true")
     p.add_argument("--ml-template-overlay", action="store_true", default=None, help="Apply Template-like ML overlay in template_default_universe mode")
     p.add_argument("--ml-meta-overlay", action="store_true", default=None, help="Apply Template phase1 meta overlay (ML_META) on top of ML overlay")
+    p.add_argument("--ml-meta-triple-barrier", action="store_true", help="Use triple-barrier labels for ML_META fitting")
+    p.add_argument("--ml-meta-tb-horizon", type=int, default=5)
+    p.add_argument("--ml-meta-tb-upper", type=float, default=0.01)
+    p.add_argument("--ml-meta-tb-lower", type=float, default=0.01)
     p.add_argument("--ml-prob-threshold", type=float, default=0.0)
+    p.add_argument("--ml-feature-fracdiff", action="store_true", help="Enable fractional differencing RF feature")
+    p.add_argument("--ml-feature-fracdiff-order", type=float, default=0.4)
+    p.add_argument("--ml-feature-fracdiff-threshold", type=float, default=1e-5)
+    p.add_argument("--ml-feature-fracdiff-max-terms", type=int, default=256)
+    p.add_argument("--ml-feature-har-rv", action="store_true", help="Enable HAR-RV RF features")
+    p.add_argument("--ml-feature-har-rv-windows", type=_parse_csv_ints, default=(1, 5, 22))
+    p.add_argument("--ml-feature-har-rv-no-log", action="store_true", help="Disable log1p transform for HAR-RV features")
     p.add_argument("--data-max-assets", type=int, default=3)
     p.add_argument("--disable-full-universe-override", action="store_true")
     p.add_argument("--portfolio-method", default="bl")
     p.add_argument("--portfolio-risk-aversion", type=float, default=2.5)
+    p.add_argument("--portfolio-cov-shrinkage", type=float, default=0.15)
+    p.add_argument("--portfolio-covariance-backend", default="sample")
+    p.add_argument("--portfolio-correlation-backend", default="pearson")
+    p.add_argument("--portfolio-gerber-threshold", type=float, default=0.5)
     p.add_argument("--portfolio-bl-tau", type=float, default=0.05)
     p.add_argument("--portfolio-view-confidence", type=float, default=0.65)
     p.add_argument("--portfolio-bl-omega-scale", type=float, default=0.25)
     p.add_argument("--portfolio-bl-max-weight", type=float, default=0.15)
+    p.add_argument("--portfolio-regime-mapping-enabled", action="store_true")
+    p.add_argument("--portfolio-regime-mapping-mode", default="linear")
+    p.add_argument("--portfolio-regime-mapping-min-multiplier", type=float, default=1.0)
+    p.add_argument("--portfolio-regime-mapping-max-multiplier", type=float, default=1.0)
+    p.add_argument(
+        "--portfolio-regime-mapping-step-thresholds",
+        type=_parse_csv_floats,
+        default=(0.30, 0.70),
+    )
+    p.add_argument(
+        "--portfolio-regime-mapping-step-multipliers",
+        type=_parse_csv_floats,
+        default=(1.0, 1.0, 1.0),
+    )
+    p.add_argument("--portfolio-regime-mapping-kelly-gamma", type=float, default=2.0)
     p.add_argument("--ml-hmm-scalar-floor", type=float, default=0.30)
     p.add_argument("--ml-hmm-scalar-ceiling", type=float, default=1.50)
     p.add_argument("--vol-target-apply-to-ml", action="store_true")
+    p.add_argument("--fee-rate", type=float, default=0.0005)
+    p.add_argument("--slippage-rate", type=float, default=0.0005)
+    p.add_argument("--cost-model", default="simple")
+    p.add_argument("--spread-bps", type=float, default=0.0)
+    p.add_argument("--impact-coeff", type=float, default=0.0)
+    p.add_argument("--borrow-bps", type=float, default=0.0)
+    p.add_argument("--dynamic-trading", action="store_true", help="Enable dynamic trading partial-adjustment schedule")
+    p.add_argument("--dynamic-trading-lambda", type=float, default=0.0)
+    p.add_argument("--dynamic-trading-aim-multiplier", type=float, default=0.0)
+    p.add_argument("--dynamic-trading-min-trade-rate", type=float, default=0.10)
+    p.add_argument("--dynamic-trading-max-trade-rate", type=float, default=1.0)
+    p.add_argument("--execution-backend", choices=("instant", "almgren_chriss"), default="instant")
+    p.add_argument("--execution-ac-n-slices", type=int, default=4)
+    p.add_argument("--execution-ac-risk-aversion", type=float, default=1.0)
+    p.add_argument("--execution-ac-temporary-impact", type=float, default=0.10)
+    p.add_argument("--execution-ac-permanent-impact", type=float, default=0.01)
+    p.add_argument("--execution-ac-volatility-lookback", type=int, default=20)
+    p.add_argument("--experimental-multi-horizon-blend", action="store_true")
+    p.add_argument("--experimental-conformal-sizing", action="store_true")
+    p.add_argument("--experimental-futuretesting", action="store_true")
+    p.add_argument("--experimental-futuretesting-n-paths", type=int, default=200)
+    p.add_argument("--experimental-futuretesting-horizon", type=int, default=126)
     p.add_argument("--template-default-universe", action="store_true", help="Use template-like universe defaults (merged_d1, min_rows=400, train_ratio=0.60, full asset set)")
+    p.add_argument(
+        "--template-rebalance",
+        action="store_true",
+        help="Keep template-default-universe profile but allow dynamic rebalancing/backtest schedule",
+    )
     p.add_argument(
         "--no-template-precomputed-artifacts",
         action="store_true",
@@ -736,6 +1087,12 @@ def main(argv=None):
         "--strict-independent",
         action="store_true",
         help="Fail if benchmark/comparator CSV data is injected into modular run outputs",
+    )
+    p.add_argument(
+        "--cpp-hmm-profile",
+        choices=available_cpp_hmm_profiles(),
+        default=None,
+        help="Opt-in C++ HMM profile preset (default: off)",
     )
     p.add_argument("--cle-enabled", action="store_true", help="Enable Confluence Leverage Engine policy wiring")
     p.add_argument("--cle-use-external-proxies", action="store_true", help="Enable CLE external proxy feature inputs")
@@ -780,6 +1137,16 @@ def main(argv=None):
             validation_oos_min_sharpe=args.validation_oos_min_sharpe,
             validation_oos_max_drawdown=args.validation_oos_max_drawdown,
             validation_oos_max_turnover=args.validation_oos_max_turnover,
+            validation_oos_min_calmar=args.validation_oos_min_calmar,
+            validation_psr_threshold=args.validation_psr_threshold,
+            validation_dsr_threshold=args.validation_dsr_threshold,
+            validation_pbo_max=args.validation_pbo_max,
+            validation_cpcv_n_groups=args.validation_cpcv_n_groups,
+            validation_cpcv_n_test_groups=args.validation_cpcv_n_test_groups,
+            validation_cpcv_purge_groups=args.validation_cpcv_purge_groups,
+            validation_cpcv_embargo_groups=args.validation_cpcv_embargo_groups,
+            validation_cpcv_max_splits=args.validation_cpcv_max_splits,
+            validation_hard_fail=args.validation_hard_fail,
             modular_data_signals_enabled=args.modular_data_signals,
             modular_portfolio_enabled=args.modular_portfolio,
             data_path=args.data_path,
@@ -787,21 +1154,67 @@ def main(argv=None):
             ml_modular_path_enabled=args.ml_modular_path,
             ml_template_overlay=args.ml_template_overlay,
             ml_meta_overlay=args.ml_meta_overlay,
+            ml_meta_use_triple_barrier=args.ml_meta_triple_barrier,
+            ml_meta_tb_horizon=args.ml_meta_tb_horizon,
+            ml_meta_tb_upper=args.ml_meta_tb_upper,
+            ml_meta_tb_lower=args.ml_meta_tb_lower,
             ml_probability_threshold=args.ml_prob_threshold,
+            ml_feature_fracdiff_enabled=args.ml_feature_fracdiff,
+            ml_feature_fracdiff_order=args.ml_feature_fracdiff_order,
+            ml_feature_fracdiff_threshold=args.ml_feature_fracdiff_threshold,
+            ml_feature_fracdiff_max_terms=args.ml_feature_fracdiff_max_terms,
+            ml_feature_har_rv_enabled=args.ml_feature_har_rv,
+            ml_feature_har_rv_windows=args.ml_feature_har_rv_windows,
+            ml_feature_har_rv_use_log=(not args.ml_feature_har_rv_no_log),
             data_max_assets=args.data_max_assets,
             data_full_universe_for_parity=(not args.disable_full_universe_override),
             portfolio_method=args.portfolio_method,
             portfolio_risk_aversion=args.portfolio_risk_aversion,
+            portfolio_cov_shrinkage=args.portfolio_cov_shrinkage,
+            portfolio_covariance_backend=args.portfolio_covariance_backend,
+            portfolio_correlation_backend=args.portfolio_correlation_backend,
+            portfolio_gerber_threshold=args.portfolio_gerber_threshold,
             portfolio_bl_tau=args.portfolio_bl_tau,
             portfolio_bl_view_confidence=args.portfolio_view_confidence,
             portfolio_bl_omega_scale=args.portfolio_bl_omega_scale,
             portfolio_bl_max_weight=args.portfolio_bl_max_weight,
+            portfolio_regime_mapping_enabled=args.portfolio_regime_mapping_enabled,
+            portfolio_regime_mapping_mode=args.portfolio_regime_mapping_mode,
+            portfolio_regime_mapping_min_multiplier=args.portfolio_regime_mapping_min_multiplier,
+            portfolio_regime_mapping_max_multiplier=args.portfolio_regime_mapping_max_multiplier,
+            portfolio_regime_mapping_step_thresholds=args.portfolio_regime_mapping_step_thresholds,
+            portfolio_regime_mapping_step_multipliers=args.portfolio_regime_mapping_step_multipliers,
+            portfolio_regime_mapping_kelly_gamma=args.portfolio_regime_mapping_kelly_gamma,
             ml_hmm_scalar_floor=args.ml_hmm_scalar_floor,
             ml_hmm_scalar_ceiling=args.ml_hmm_scalar_ceiling,
             vol_target_apply_to_ml=args.vol_target_apply_to_ml,
+            fee_rate=args.fee_rate,
+            slippage_rate=args.slippage_rate,
+            cost_model=args.cost_model,
+            spread_bps=args.spread_bps,
+            impact_coeff=args.impact_coeff,
+            borrow_bps=args.borrow_bps,
+            dynamic_trading_enabled=args.dynamic_trading,
+            dynamic_trading_lambda=args.dynamic_trading_lambda,
+            dynamic_trading_aim_multiplier=args.dynamic_trading_aim_multiplier,
+            dynamic_trading_min_trade_rate=args.dynamic_trading_min_trade_rate,
+            dynamic_trading_max_trade_rate=args.dynamic_trading_max_trade_rate,
+            execution_backend=args.execution_backend,
+            execution_ac_n_slices=args.execution_ac_n_slices,
+            execution_ac_risk_aversion=args.execution_ac_risk_aversion,
+            execution_ac_temporary_impact=args.execution_ac_temporary_impact,
+            execution_ac_permanent_impact=args.execution_ac_permanent_impact,
+            execution_ac_volatility_lookback=args.execution_ac_volatility_lookback,
+            experimental_multi_horizon_blend_enabled=args.experimental_multi_horizon_blend,
+            experimental_conformal_sizing_enabled=args.experimental_conformal_sizing,
+            experimental_futuretesting_enabled=args.experimental_futuretesting,
+            experimental_futuretesting_n_paths=args.experimental_futuretesting_n_paths,
+            experimental_futuretesting_horizon=args.experimental_futuretesting_horizon,
             template_default_universe=args.template_default_universe,
+            template_rebalance_enabled=args.template_rebalance,
             template_use_precomputed_artifacts=(not args.no_template_precomputed_artifacts),
             ml_meta_comparator_use_benchmark_csv=args.ml_meta_comparator_benchmark_csv,
+            cpp_hmm_profile=args.cpp_hmm_profile,
             strict_independent_mode=args.strict_independent,
             cle_enabled=args.cle_enabled,
             cle_use_external_proxies=args.cle_use_external_proxies,

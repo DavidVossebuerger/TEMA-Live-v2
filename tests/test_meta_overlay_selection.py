@@ -87,3 +87,25 @@ def test_meta_overlay_template_mode_stays_template_compatible():
 
     assert diag["selection_mode"] == "template_compatible"
     assert diag["chosen_floor"] >= 0.2
+
+
+def test_meta_overlay_supports_triple_barrier_labeling():
+    baseline_train, baseline_test, ml_train, ml_test = _synthetic_series()
+    cfg = BacktestConfig(
+        template_use_precomputed_artifacts=False,
+        ml_meta_overlay_enabled=True,
+        ml_meta_use_triple_barrier=True,
+        ml_meta_tb_horizon=7,
+        ml_meta_tb_upper=0.01,
+        ml_meta_tb_lower=0.01,
+    )
+
+    *_series, diag = compute_ml_meta_overlay_series(
+        baseline_train=baseline_train,
+        baseline_test=baseline_test,
+        ml_train=ml_train,
+        ml_test=ml_test,
+        cfg=cfg,
+    )
+
+    assert diag["labeling_mode"] == "triple_barrier"

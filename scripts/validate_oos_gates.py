@@ -23,6 +23,7 @@ def main():
     p.add_argument("--min-sharpe", type=float, default=None)
     p.add_argument("--max-drawdown", type=float, default=None)
     p.add_argument("--max-turnover", type=float, default=None)
+    p.add_argument("--min-calmar", type=float, default=None)
 
     args = p.parse_args()
     path = args.path
@@ -35,7 +36,13 @@ def main():
         print(json.dumps({"error": f"manifest not found: {manifest_path}"}))
         sys.exit(2)
 
-    res = validate_oos_gates(manifest_path, min_sharpe=args.min_sharpe, max_drawdown=args.max_drawdown, max_turnover=args.max_turnover)
+    res = validate_oos_gates(
+        manifest_path,
+        min_sharpe=args.min_sharpe,
+        max_drawdown=args.max_drawdown,
+        max_turnover=args.max_turnover,
+        min_calmar=args.min_calmar,
+    )
     print(json.dumps(res))
     sys.exit(0 if res.get("passed") else 1)
 

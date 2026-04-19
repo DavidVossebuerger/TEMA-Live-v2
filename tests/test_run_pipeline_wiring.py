@@ -29,18 +29,62 @@ def test_run_modular_wires_new_knobs(monkeypatch):
         ml_modular_path_enabled=True,
         ml_template_overlay=True,
         ml_meta_overlay=True,
+        ml_meta_use_triple_barrier=True,
+        ml_meta_tb_horizon=7,
+        ml_meta_tb_upper=0.02,
+        ml_meta_tb_lower=0.015,
         ml_probability_threshold=0.55,
+        ml_feature_fracdiff_enabled=True,
+        ml_feature_fracdiff_order=0.35,
+        ml_feature_fracdiff_threshold=1e-4,
+        ml_feature_fracdiff_max_terms=128,
+        ml_feature_har_rv_enabled=True,
+        ml_feature_har_rv_windows=(1, 5, 22),
+        ml_feature_har_rv_use_log=False,
         data_max_assets=11,
         data_full_universe_for_parity=False,
         portfolio_method="bl",
         portfolio_risk_aversion=3.0,
+        portfolio_cov_shrinkage=0.2,
+        portfolio_covariance_backend="correlation",
+        portfolio_correlation_backend="gerber",
+        portfolio_gerber_threshold=0.4,
         portfolio_bl_tau=0.07,
         portfolio_bl_view_confidence=0.70,
         portfolio_bl_omega_scale=0.30,
         portfolio_bl_max_weight=0.20,
+        portfolio_regime_mapping_enabled=True,
+        portfolio_regime_mapping_mode="stepwise",
+        portfolio_regime_mapping_min_multiplier=0.6,
+        portfolio_regime_mapping_max_multiplier=1.4,
+        portfolio_regime_mapping_step_thresholds=(0.2, 0.7),
+        portfolio_regime_mapping_step_multipliers=(0.7, 1.0, 1.3),
+        portfolio_regime_mapping_kelly_gamma=2.2,
         ml_hmm_scalar_floor=0.25,
         ml_hmm_scalar_ceiling=1.10,
         vol_target_apply_to_ml=True,
+        fee_rate=0.0012,
+        slippage_rate=0.0013,
+        cost_model="extended",
+        spread_bps=2.0,
+        impact_coeff=0.02,
+        borrow_bps=12.0,
+        dynamic_trading_enabled=True,
+        dynamic_trading_lambda=0.4,
+        dynamic_trading_aim_multiplier=0.2,
+        dynamic_trading_min_trade_rate=0.15,
+        dynamic_trading_max_trade_rate=0.9,
+        execution_backend="almgren_chriss",
+        execution_ac_n_slices=5,
+        execution_ac_risk_aversion=1.2,
+        execution_ac_temporary_impact=0.08,
+        execution_ac_permanent_impact=0.02,
+        execution_ac_volatility_lookback=15,
+        experimental_multi_horizon_blend_enabled=True,
+        experimental_conformal_sizing_enabled=True,
+        experimental_futuretesting_enabled=True,
+        experimental_futuretesting_n_paths=321,
+        experimental_futuretesting_horizon=77,
         cle_enabled=True,
         cle_use_external_proxies=True,
         cle_mode="confluence_blend",
@@ -62,6 +106,16 @@ def test_run_modular_wires_new_knobs(monkeypatch):
         cle_online_calibration_window=3,
         cle_online_calibration_learning_rate=0.15,
         cle_online_calibration_l2=2e-4,
+        validation_oos_min_calmar=0.8,
+        validation_psr_threshold=0.9,
+        validation_dsr_threshold=0.75,
+        validation_pbo_max=0.4,
+        validation_cpcv_n_groups=8,
+        validation_cpcv_n_test_groups=2,
+        validation_cpcv_purge_groups=1,
+        validation_cpcv_embargo_groups=1,
+        validation_cpcv_max_splits=64,
+        validation_hard_fail=True,
     )
 
     cfg = captured["cfg"]
@@ -70,17 +124,61 @@ def test_run_modular_wires_new_knobs(monkeypatch):
     assert cfg.ml_modular_path_enabled is True
     assert cfg.ml_template_overlay_enabled is True
     assert cfg.ml_meta_overlay_enabled is True
+    assert cfg.ml_meta_use_triple_barrier is True
+    assert cfg.ml_meta_tb_horizon == 7
+    assert cfg.ml_meta_tb_upper == 0.02
+    assert cfg.ml_meta_tb_lower == 0.015
     assert cfg.ml_probability_threshold == 0.55
+    assert cfg.ml_feature_fracdiff_enabled is True
+    assert cfg.ml_feature_fracdiff_order == 0.35
+    assert cfg.ml_feature_fracdiff_threshold == 1e-4
+    assert cfg.ml_feature_fracdiff_max_terms == 128
+    assert cfg.ml_feature_har_rv_enabled is True
+    assert cfg.ml_feature_har_rv_windows == (1, 5, 22)
+    assert cfg.ml_feature_har_rv_use_log is False
     assert cfg.data_max_assets == 11
     assert cfg.data_full_universe_for_parity is False
     assert cfg.portfolio_risk_aversion == 3.0
+    assert cfg.portfolio_cov_shrinkage == 0.2
+    assert cfg.portfolio_covariance_backend == "correlation"
+    assert cfg.portfolio_correlation_backend == "gerber"
+    assert cfg.portfolio_gerber_threshold == 0.4
     assert cfg.portfolio_bl_tau == 0.07
     assert cfg.portfolio_bl_view_confidence == 0.70
     assert cfg.portfolio_bl_omega_scale == 0.30
     assert cfg.portfolio_bl_max_weight == 0.20
+    assert cfg.portfolio_regime_mapping_enabled is True
+    assert cfg.portfolio_regime_mapping_mode == "stepwise"
+    assert cfg.portfolio_regime_mapping_min_multiplier == 0.6
+    assert cfg.portfolio_regime_mapping_max_multiplier == 1.4
+    assert cfg.portfolio_regime_mapping_step_thresholds == (0.2, 0.7)
+    assert cfg.portfolio_regime_mapping_step_multipliers == (0.7, 1.0, 1.3)
+    assert cfg.portfolio_regime_mapping_kelly_gamma == 2.2
     assert cfg.ml_hmm_scalar_floor == 0.25
     assert cfg.ml_hmm_scalar_ceiling == 1.10
     assert cfg.vol_target_apply_to_ml is True
+    assert cfg.fee_rate == 0.0012
+    assert cfg.slippage_rate == 0.0013
+    assert cfg.cost_model == "extended"
+    assert cfg.spread_bps == 2.0
+    assert cfg.impact_coeff == 0.02
+    assert cfg.borrow_bps == 12.0
+    assert cfg.dynamic_trading_enabled is True
+    assert cfg.dynamic_trading_lambda == 0.4
+    assert cfg.dynamic_trading_aim_multiplier == 0.2
+    assert cfg.dynamic_trading_min_trade_rate == 0.15
+    assert cfg.dynamic_trading_max_trade_rate == 0.9
+    assert cfg.execution_backend == "almgren_chriss"
+    assert cfg.execution_ac_n_slices == 5
+    assert cfg.execution_ac_risk_aversion == 1.2
+    assert cfg.execution_ac_temporary_impact == 0.08
+    assert cfg.execution_ac_permanent_impact == 0.02
+    assert cfg.execution_ac_volatility_lookback == 15
+    assert cfg.experimental_multi_horizon_blend_enabled is True
+    assert cfg.experimental_conformal_sizing_enabled is True
+    assert cfg.experimental_futuretesting_enabled is True
+    assert cfg.experimental_futuretesting_n_paths == 321
+    assert cfg.experimental_futuretesting_horizon == 77
     assert cfg.cle_enabled is True
     assert cfg.cle_use_external_proxies is True
     assert cfg.cle_mode == "confluence_blend"
@@ -148,6 +246,30 @@ def test_run_modular_template_default_universe_sets_profile_defaults(monkeypatch
     # explicitly set it. The meta overlay should remain off by default.
     assert cfg.ml_template_overlay_enabled is True
     assert cfg.ml_meta_overlay_enabled is False
+    assert cfg.template_rebalance_enabled is False
+
+
+def test_run_modular_wires_template_rebalance_opt_in(monkeypatch):
+    captured = {}
+
+    def _fake_pipeline(run_id, cfg, out_root):
+        captured["cfg"] = cfg
+        return {"manifest_path": "x", "out_dir": "y", "manifest": {"run_id": run_id, "artifacts": []}}
+
+    import tema.pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "run_pipeline", _fake_pipeline)
+    run_pipeline.run_modular(
+        run_id="template-rebalance",
+        out_root="outputs",
+        template_default_universe=True,
+        template_rebalance_enabled=True,
+    )
+
+    cfg = captured["cfg"]
+    assert cfg.template_default_universe is True
+    assert cfg.template_rebalance_enabled is True
+    assert cfg.modular_data_signals_enabled is True
 
 
 def test_run_modular_wires_template_precomputed_toggle(monkeypatch):
@@ -242,6 +364,30 @@ def test_run_modular_template_default_universe_keeps_explicit_data_path(monkeypa
     assert cfg.signal_slow_period == 20
 
 
+def test_run_modular_cpp_hmm_profile_is_opt_in_and_applies_overrides(monkeypatch):
+    captured = {}
+
+    def _fake_pipeline(run_id, cfg, out_root):
+        captured["cfg"] = cfg
+        return {"manifest_path": "x", "out_dir": "y", "manifest": {"run_id": run_id, "artifacts": []}}
+
+    import tema.pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "run_pipeline", _fake_pipeline)
+    run_pipeline.run_modular(run_id="cpp-profile-on", out_root="outputs", cpp_hmm_profile="sweep-optimized-v1")
+    cfg = captured["cfg"]
+    assert cfg.cpp_hmm_profile == "sweep-optimized-v1"
+    assert cfg.hmm_n_states == 2
+    assert cfg.hmm_n_iter == 30
+    assert cfg.hmm_var_floor == 1e-8
+    assert cfg.hmm_trans_sticky == 0.95
+
+    run_pipeline.run_modular(run_id="cpp-profile-off", out_root="outputs")
+    cfg = captured["cfg"]
+    assert cfg.cpp_hmm_profile is None
+    assert cfg.hmm_trans_sticky == 0.92
+
+
 def test_main_passes_out_root_to_modular(monkeypatch):
     captured = {}
 
@@ -277,6 +423,27 @@ def test_main_passes_template_precomputed_toggle(monkeypatch):
     assert captured["kwargs"]["template_default_universe"] is True
     assert captured["kwargs"]["template_use_precomputed_artifacts"] is False
     assert captured["kwargs"]["ml_meta_comparator_use_benchmark_csv"] is False
+
+
+def test_main_passes_template_rebalance_toggle(monkeypatch):
+    captured = {}
+
+    def _fake_run_modular(run_id, out_root="outputs", **kwargs):
+        captured["kwargs"] = kwargs
+        return {"run_id": run_id}
+
+    monkeypatch.setattr(run_pipeline, "run_modular", _fake_run_modular)
+    run_pipeline.main(
+        [
+            "--run-id",
+            "mod-template-rebalance",
+            "--template-default-universe",
+            "--template-rebalance",
+        ]
+    )
+
+    assert captured["kwargs"]["template_default_universe"] is True
+    assert captured["kwargs"]["template_rebalance_enabled"] is True
 
 
 def test_main_passes_ml_meta_comparator_toggle(monkeypatch):
@@ -319,6 +486,181 @@ def test_main_passes_strict_independent_toggle(monkeypatch):
     )
 
     assert captured["kwargs"]["strict_independent_mode"] is True
+
+
+def test_main_passes_cpp_hmm_profile_toggle(monkeypatch):
+    captured = {}
+
+    def _fake_run_modular(run_id, out_root="outputs", **kwargs):
+        captured["kwargs"] = kwargs
+        return {"run_id": run_id}
+
+    monkeypatch.setattr(run_pipeline, "run_modular", _fake_run_modular)
+    run_pipeline.main(["--run-id", "mod-cpp-profile", "--cpp-hmm-profile", "sweep-optimized-v1"])
+
+    assert captured["kwargs"]["cpp_hmm_profile"] == "sweep-optimized-v1"
+
+
+def test_main_passes_ml_advanced_feature_toggles(monkeypatch):
+    captured = {}
+
+    def _fake_run_modular(run_id, out_root="outputs", **kwargs):
+        captured["kwargs"] = kwargs
+        return {"run_id": run_id}
+
+    monkeypatch.setattr(run_pipeline, "run_modular", _fake_run_modular)
+    run_pipeline.main(
+        [
+            "--run-id",
+            "mod-ml-advanced-features",
+            "--ml-feature-fracdiff",
+            "--ml-feature-fracdiff-order",
+            "0.35",
+            "--ml-feature-fracdiff-threshold",
+            "0.0001",
+            "--ml-feature-fracdiff-max-terms",
+            "128",
+            "--ml-feature-har-rv",
+            "--ml-feature-har-rv-windows",
+            "1,5,22",
+            "--ml-feature-har-rv-no-log",
+        ]
+    )
+
+    assert captured["kwargs"]["ml_feature_fracdiff_enabled"] is True
+    assert captured["kwargs"]["ml_feature_fracdiff_order"] == 0.35
+    assert captured["kwargs"]["ml_feature_fracdiff_threshold"] == 0.0001
+    assert captured["kwargs"]["ml_feature_fracdiff_max_terms"] == 128
+    assert captured["kwargs"]["ml_feature_har_rv_enabled"] is True
+    assert captured["kwargs"]["ml_feature_har_rv_windows"] == (1, 5, 22)
+    assert captured["kwargs"]["ml_feature_har_rv_use_log"] is False
+
+
+def test_main_passes_execution_and_experimental_knobs(monkeypatch):
+    captured = {}
+
+    def _fake_run_modular(run_id, out_root="outputs", **kwargs):
+        captured["kwargs"] = kwargs
+        return {"run_id": run_id}
+
+    monkeypatch.setattr(run_pipeline, "run_modular", _fake_run_modular)
+    run_pipeline.main(
+        [
+            "--run-id",
+            "mod-exec-exp",
+            "--fee-rate",
+            "0.0012",
+            "--slippage-rate",
+            "0.0013",
+            "--cost-model",
+            "extended",
+            "--spread-bps",
+            "2.0",
+            "--impact-coeff",
+            "0.02",
+            "--borrow-bps",
+            "12.0",
+            "--dynamic-trading",
+            "--dynamic-trading-lambda",
+            "0.4",
+            "--dynamic-trading-aim-multiplier",
+            "0.2",
+            "--dynamic-trading-min-trade-rate",
+            "0.15",
+            "--dynamic-trading-max-trade-rate",
+            "0.9",
+            "--execution-backend",
+            "almgren_chriss",
+            "--execution-ac-n-slices",
+            "5",
+            "--execution-ac-risk-aversion",
+            "1.2",
+            "--execution-ac-temporary-impact",
+            "0.08",
+            "--execution-ac-permanent-impact",
+            "0.02",
+            "--execution-ac-volatility-lookback",
+            "15",
+            "--experimental-multi-horizon-blend",
+            "--experimental-conformal-sizing",
+            "--experimental-futuretesting",
+            "--experimental-futuretesting-n-paths",
+            "321",
+            "--experimental-futuretesting-horizon",
+            "77",
+        ]
+    )
+
+    assert captured["kwargs"]["fee_rate"] == 0.0012
+    assert captured["kwargs"]["slippage_rate"] == 0.0013
+    assert captured["kwargs"]["cost_model"] == "extended"
+    assert captured["kwargs"]["spread_bps"] == 2.0
+    assert captured["kwargs"]["impact_coeff"] == 0.02
+    assert captured["kwargs"]["borrow_bps"] == 12.0
+    assert captured["kwargs"]["dynamic_trading_enabled"] is True
+    assert captured["kwargs"]["dynamic_trading_lambda"] == 0.4
+    assert captured["kwargs"]["dynamic_trading_aim_multiplier"] == 0.2
+    assert captured["kwargs"]["dynamic_trading_min_trade_rate"] == 0.15
+    assert captured["kwargs"]["dynamic_trading_max_trade_rate"] == 0.9
+    assert captured["kwargs"]["execution_backend"] == "almgren_chriss"
+    assert captured["kwargs"]["execution_ac_n_slices"] == 5
+    assert captured["kwargs"]["execution_ac_risk_aversion"] == 1.2
+    assert captured["kwargs"]["execution_ac_temporary_impact"] == 0.08
+    assert captured["kwargs"]["execution_ac_permanent_impact"] == 0.02
+    assert captured["kwargs"]["execution_ac_volatility_lookback"] == 15
+    assert captured["kwargs"]["experimental_multi_horizon_blend_enabled"] is True
+    assert captured["kwargs"]["experimental_conformal_sizing_enabled"] is True
+    assert captured["kwargs"]["experimental_futuretesting_enabled"] is True
+    assert captured["kwargs"]["experimental_futuretesting_n_paths"] == 321
+    assert captured["kwargs"]["experimental_futuretesting_horizon"] == 77
+
+
+def test_main_passes_validation_probabilistic_and_cpcv_knobs(monkeypatch):
+    captured = {}
+
+    def _fake_run_modular(run_id, out_root="outputs", **kwargs):
+        captured["kwargs"] = kwargs
+        return {"run_id": run_id}
+
+    monkeypatch.setattr(run_pipeline, "run_modular", _fake_run_modular)
+    run_pipeline.main(
+        [
+            "--run-id",
+            "mod-validation-prob",
+            "--validation-oos-min-calmar",
+            "0.8",
+            "--validation-psr-threshold",
+            "0.9",
+            "--validation-dsr-threshold",
+            "0.75",
+            "--validation-pbo-max",
+            "0.4",
+            "--validation-cpcv-n-groups",
+            "8",
+            "--validation-cpcv-max-splits",
+            "64",
+            "--validation-hard-fail",
+            "--ml-meta-triple-barrier",
+            "--ml-meta-tb-horizon",
+            "7",
+            "--ml-meta-tb-upper",
+            "0.02",
+            "--ml-meta-tb-lower",
+            "0.015",
+        ]
+    )
+
+    assert captured["kwargs"]["validation_oos_min_calmar"] == 0.8
+    assert captured["kwargs"]["validation_psr_threshold"] == 0.9
+    assert captured["kwargs"]["validation_dsr_threshold"] == 0.75
+    assert captured["kwargs"]["validation_pbo_max"] == 0.4
+    assert captured["kwargs"]["validation_cpcv_n_groups"] == 8
+    assert captured["kwargs"]["validation_cpcv_max_splits"] == 64
+    assert captured["kwargs"]["validation_hard_fail"] is True
+    assert captured["kwargs"]["ml_meta_use_triple_barrier"] is True
+    assert captured["kwargs"]["ml_meta_tb_horizon"] == 7
+    assert captured["kwargs"]["ml_meta_tb_upper"] == 0.02
+    assert captured["kwargs"]["ml_meta_tb_lower"] == 0.015
 
 
 def test_main_passes_template_bl_knobs(monkeypatch):

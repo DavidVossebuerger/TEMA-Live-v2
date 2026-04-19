@@ -10,18 +10,22 @@ def _load_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def _find_metric_keys(d: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """Try to discover sharpe, max_drawdown and annualized_turnover values in a dict.
+def _find_metric_keys(d: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Try to discover sharpe, max_drawdown, annualized_turnover and calmar values in a dict.
 
-    Returns (sharpe, max_drawdown, annualized_turnover) where each may be None if not found.
+    Returns (sharpe, max_drawdown, annualized_turnover, calmar) where each may be None if not found.
     """
     sharpe = None
     mdd = None
     turnover = None
+    calmar = None
+    ann_ret = None
     # Possible key names
     sharpe_keys = ["sharpe", "sharpe_ratio", "test_sharpe", "test_sharpe_ratio", "annualized_sharpe", "train_sharpe", "val_sharpe"]
     mdd_keys = ["max_drawdown", "mdd", "max_dd", "test_max_drawdown", "train_max_drawdown"]
     turnover_keys = ["annualized_turnover", "turnover", "annual_turnover", "test_annualized_turnover", "train_annualized_turnover"]
+    calmar_keys = ["calmar", "calmar_ratio", "test_calmar", "annualized_calmar"]
+    annual_return_keys = ["annual_return", "annualized_return", "test_annual_return", "test_annualized_return"]
 
     for k in sharpe_keys:
         if k in d and isinstance(d[k], (int, float)):
@@ -35,11 +39,28 @@ def _find_metric_keys(d: Dict[str, Any]) -> Tuple[Optional[float], Optional[floa
         if k in d and isinstance(d[k], (int, float)):
             turnover = float(d[k])
             break
+    for k in calmar_keys:
+        if k in d and isinstance(d[k], (int, float)):
+            calmar = float(d[k])
+            break
+    for k in annual_return_keys:
+        if k in d and isinstance(d[k], (int, float)):
+            ann_ret = float(d[k])
+            break
 
-    return sharpe, mdd, turnover
+    if calmar is None and ann_ret is not None and mdd is not None and abs(float(mdd)) > 1e-12:
+        calmar = float(ann_ret) / abs(float(mdd))
+
+    return sharpe, mdd, turnover, calmar
 
 
-def validate_oos_gates(manifest_path: str, min_sharpe: Optional[float] = None, max_drawdown: Optional[float] = None, max_turnover: Optional[float] = None) -> Dict[str, Any]:
+def validate_oos_gates(
+    manifest_path: str,
+    min_sharpe: Optional[float] = None,
+    max_drawdown: Optional[float] = None,
+    max_turnover: Optional[float] = None,
+    min_calmar: Optional[float] = None,
+) -> Dict[str, Any]:
     """Validate out-of-sample gates for a run described by manifest_path.
 
     The manifest is expected to be a JSON with an 'artifacts' list. This validator will look through
@@ -93,8 +114,14 @@ def validate_oos_gates(manifest_path: str, min_sharpe: Optional[float] = None, m
             result["checked_artifacts"].append({"path": p, "loaded": False, "error": str(e)})
             continue
 
-        sharpe, mdd, turnover = _find_metric_keys(data)
-        entry = {"path": p, "has_sharpe": sharpe is not None, "has_mdd": mdd is not None, "has_turnover": turnover is not None}
+        sharpe, mdd, turnover, calmar = _find_metric_keys(data)
+        entry = {
+            "path": p,
+            "has_sharpe": sharpe is not None,
+            "has_mdd": mdd is not None,
+            "has_turnover": turnover is not None,
+            "has_calmar": calmar is not None,
+        }
         # stress scenario sanity
         stress_ok = None
         if "stress_scenarios" in data and isinstance(data["stress_scenarios"], dict):
@@ -156,8 +183,21 @@ def validate_oos_gates(manifest_path: str, min_sharpe: Optional[float] = None, m
                 if not ok:
                     result["passed"] = False
 
+        if min_calmar is not None:
+            if calmar is None:
+                result["checks"]["min_calmar"] = {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "calmar not found",
+                }
+            else:
+                ok = float(calmar) >= float(min_calmar)
+                result["checks"]["min_calmar"] = {"ok": ok, "value": calmar, "threshold": float(min_calmar)}
+                if not ok:
+                    result["passed"] = False
+
         # If we reached here and at least one metric was present, mark found and break (we only need one perf artifact)
-        if sharpe is not None or mdd is not None or turnover is not None or stress_ok is not None:
+        if sharpe is not None or mdd is not None or turnover is not None or calmar is not None or stress_ok is not None:
             found = True
             break
 
@@ -180,6 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-sharpe", type=float, default=None)
     parser.add_argument("--max-drawdown", type=float, default=None)
     parser.add_argument("--max-turnover", type=float, default=None)
+    parser.add_argument("--min-calmar", type=float, default=None)
 
     args = parser.parse_args()
     p = args.path
@@ -192,6 +233,12 @@ if __name__ == "__main__":
         print(json.dumps({"error": f"manifest not found: {manifest_path}"}))
         sys.exit(2)
 
-    res = validate_oos_gates(manifest_path, min_sharpe=args.min_sharpe, max_drawdown=args.max_drawdown, max_turnover=args.max_turnover)
+    res = validate_oos_gates(
+        manifest_path,
+        min_sharpe=args.min_sharpe,
+        max_drawdown=args.max_drawdown,
+        max_turnover=args.max_turnover,
+        min_calmar=args.min_calmar,
+    )
     print(json.dumps(res))
     sys.exit(0 if res.get("passed") else 1)

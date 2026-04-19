@@ -77,3 +77,21 @@ def test_validate_missing_metrics_is_graceful(tmp_path):
     ]
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert p.returncode == 0
+
+
+def test_validate_calmar_gate_from_annual_return_and_drawdown(tmp_path):
+    tmpdir = str(tmp_path)
+    artifacts = {
+        "sharpe": 1.2,
+        "annual_return": 0.18,
+        "max_drawdown": -0.10,
+        "annualized_turnover": 0.2,
+    }
+    manifest_path, _perf_path = _write_manifest_and_perf(tmpdir, artifacts)
+    res = validate_oos_gates(manifest_path, min_calmar=1.0)
+    assert res["passed"] is True
+    assert res["checks"]["min_calmar"]["ok"] is True
+
+    res_fail = validate_oos_gates(manifest_path, min_calmar=2.5)
+    assert res_fail["passed"] is False
+    assert res_fail["checks"]["min_calmar"]["ok"] is False

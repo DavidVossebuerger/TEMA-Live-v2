@@ -21,6 +21,8 @@ class BacktestConfig:
 
     # Template-style universe profile: merged_d1 source, min_history_rows=400, train_ratio=0.60, full asset set
     template_default_universe: bool = False
+    # Keep template profile but allow dynamic rebalancing/backtest schedules (opt-in).
+    template_rebalance_enabled: bool = False
     # When True, template_default_universe will reuse precomputed Template/*.csv artifacts
     # (asset_strategy_summary.csv + black_litterman_weights.csv) to match benchmark results
     # deterministically without re-running the expensive per-asset grid search.
@@ -49,6 +51,9 @@ class BacktestConfig:
     portfolio_use_hrp_hook: bool = False
     portfolio_use_nco_hook: bool = False
     portfolio_cov_shrinkage: float = 0.15
+    portfolio_covariance_backend: str = "sample"
+    portfolio_correlation_backend: str = "pearson"
+    portfolio_gerber_threshold: float = 0.5
     portfolio_bl_tau: float = 0.05
     portfolio_bl_view_confidence: float = 0.65
     portfolio_bl_omega_scale: float = 0.25
@@ -56,6 +61,13 @@ class BacktestConfig:
     portfolio_risk_aversion: float = 2.5
     portfolio_min_weight: float = 0.0
     portfolio_max_weight: float = 1.0
+    portfolio_regime_mapping_enabled: bool = False
+    portfolio_regime_mapping_mode: str = "linear"
+    portfolio_regime_mapping_min_multiplier: float = 1.0
+    portfolio_regime_mapping_max_multiplier: float = 1.0
+    portfolio_regime_mapping_step_thresholds: tuple[float, ...] = (0.30, 0.70)
+    portfolio_regime_mapping_step_multipliers: tuple[float, ...] = (1.0, 1.0, 1.0)
+    portfolio_regime_mapping_kelly_gamma: float = 2.0
 
     # Turnover / rebalance controls (Phase 2b)
     rebalance_min_threshold: float = 0.001
@@ -65,6 +77,12 @@ class BacktestConfig:
 
     # Penalty applied during selection/optimization: Sharpe - lambda * annualized_turnover
     turnover_penalty_lambda: float = 0.0
+    # Dynamic trading with transaction costs (Gârleanu-Pedersen-style partial adjustment)
+    dynamic_trading_enabled: bool = False
+    dynamic_trading_lambda: float = 0.0
+    dynamic_trading_aim_multiplier: float = 0.0
+    dynamic_trading_min_trade_rate: float = 0.10
+    dynamic_trading_max_trade_rate: float = 1.0
 
     # ML / position scalar controls
     ml_enabled: bool = True
@@ -73,6 +91,14 @@ class BacktestConfig:
     ml_hmm_scalar_floor: float = 0.30
     ml_hmm_scalar_ceiling: float = 1.50
     ml_probability_threshold: float = 0.0
+    # Optional advanced RF feature extensions (disabled by default for parity safety)
+    ml_feature_fracdiff_enabled: bool = False
+    ml_feature_fracdiff_order: float = 0.4
+    ml_feature_fracdiff_threshold: float = 1e-5
+    ml_feature_fracdiff_max_terms: int = 256
+    ml_feature_har_rv_enabled: bool = False
+    ml_feature_har_rv_windows: tuple[int, ...] = (1, 5, 22)
+    ml_feature_har_rv_use_log: bool = True
     ml_rf_alpha_weight: float = 1.0
     ml_rf_regime_weight: float = 0.5
     ml_rf_bias: float = 0.0
@@ -84,6 +110,7 @@ class BacktestConfig:
     # Template-like ML overlay (matches Template/TEMA-TEMPLATE(NEW_).py semantics)
     # NOTE: This overlay is applied to portfolio return streams, not to per-asset weights.
     ml_template_overlay_enabled: bool = False
+    cpp_hmm_profile: Optional[str] = None
     hmm_n_states: int = 2
     hmm_n_iter: int = 30
     hmm_var_floor: float = 1e-8
@@ -120,6 +147,11 @@ class BacktestConfig:
     ml_meta_min_turnover_per_year: float = 5.0
     ml_meta_target_mean_abs_exposure: float = 0.9
     ml_meta_target_turnover_per_year: float = 20.0
+    # Optional label path for ML_META: triple-barrier labeling on future ML returns.
+    ml_meta_use_triple_barrier: bool = False
+    ml_meta_tb_horizon: int = 5
+    ml_meta_tb_upper: float = 0.01
+    ml_meta_tb_lower: float = 0.01
     # Computed-only ML_META selection shaping (used when template precomputed artifacts are disabled)
     ml_meta_computed_allow_zero_floor: bool = True
     ml_meta_computed_target_mean_abs_exposure: float = 0.10
@@ -206,6 +238,13 @@ class BacktestConfig:
     stress_n_paths: int = 200
     stress_horizon: int = 20
 
+    # Experimental modules (Wave 4, opt-in only)
+    experimental_multi_horizon_blend_enabled: bool = False
+    experimental_conformal_sizing_enabled: bool = False
+    experimental_futuretesting_enabled: bool = False
+    experimental_futuretesting_n_paths: int = 200
+    experimental_futuretesting_horizon: int = 126
+
     # Costs
     fee_rate: float = 0.0005
     slippage_rate: float = 0.0005
@@ -214,6 +253,13 @@ class BacktestConfig:
     spread_bps: float = 0.0
     impact_coeff: float = 0.0
     borrow_bps: float = 0.0
+    # Optional execution backend: "instant" (legacy) or "almgren_chriss" (child-order schedule)
+    execution_backend: str = "instant"
+    execution_ac_n_slices: int = 4
+    execution_ac_risk_aversion: float = 1.0
+    execution_ac_temporary_impact: float = 0.10
+    execution_ac_permanent_impact: float = 0.01
+    execution_ac_volatility_lookback: int = 20
 
     # Generic
     freq: str = "D"

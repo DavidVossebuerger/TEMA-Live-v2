@@ -1,6 +1,6 @@
 import pandas as pd
 
-from tema.validation.sweep import build_heatmap, pick_best_config, summarize_sweep
+from tema.validation.sweep import build_heatmap, pick_best_config, pick_best_config_with_hard_gate, summarize_sweep
 
 
 def test_summarize_sweep_and_heatmap_and_best():
@@ -56,3 +56,39 @@ def test_summarize_sweep_and_heatmap_and_best():
     best = pick_best_config(summary, score_col="ml_test_sharpe_mean")
     assert best
     assert "ml_test_sharpe_mean" in best
+
+
+def test_pick_best_config_with_hard_gate_prefers_passing_row():
+    summary = pd.DataFrame(
+        [
+            {
+                "hmm_n_states": 2,
+                "ml_test_sharpe_mean": 1.20,
+                "hard_gate_passed_mean": 0.0,
+            },
+            {
+                "hmm_n_states": 3,
+                "ml_test_sharpe_mean": 1.00,
+                "hard_gate_passed_mean": 1.0,
+            },
+        ]
+    )
+    best = pick_best_config_with_hard_gate(
+        summary,
+        score_col="ml_test_sharpe_mean",
+        hard_gate_col="hard_gate_passed_mean",
+    )
+    assert best
+    assert best["hmm_n_states"] == 3
+
+
+def test_pick_best_config_with_hard_gate_falls_back_to_sharpe_without_gate_col():
+    summary = pd.DataFrame(
+        [
+            {"hmm_n_states": 2, "ml_test_sharpe_mean": 1.20},
+            {"hmm_n_states": 3, "ml_test_sharpe_mean": 1.00},
+        ]
+    )
+    best = pick_best_config_with_hard_gate(summary, score_col="ml_test_sharpe_mean", hard_gate_col="missing_col")
+    assert best
+    assert best["hmm_n_states"] == 2

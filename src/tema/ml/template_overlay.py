@@ -11,6 +11,8 @@ from sklearn.ensemble import RandomForestClassifier
 from tema.backtest import compute_backtest_metrics
 from tema.config import BacktestConfig
 
+from ..data.fracdiff import fractionally_differentiate
+from .har_rv import build_har_rv_features
 from .cpp_hmm import get_hmm_engine
 
 
@@ -32,7 +34,12 @@ def evaluate_weighted_portfolio_returns(returns_df: pd.DataFrame, weights: pd.Se
     return aligned.mul(weights, axis=1).sum(axis=1)
 
 
-def build_rf_feature_matrix(returns: pd.Series, hmm_probs: np.ndarray) -> pd.DataFrame:
+def build_rf_feature_matrix(
+    returns: pd.Series,
+    hmm_probs: np.ndarray,
+    *,
+    cfg: BacktestConfig | None = None,
+) -> pd.DataFrame:
     r = returns.fillna(0.0)
     f = pd.DataFrame(index=r.index)
     f["ret_1"] = r.shift(1).fillna(0.0)
@@ -43,6 +50,26 @@ def build_rf_feature_matrix(returns: pd.Series, hmm_probs: np.ndarray) -> pd.Dat
 
     for k in range(int(hmm_probs.shape[1])):
         f[f"hmm_p_{k}"] = hmm_probs[:, k]
+
+    if cfg is not None and bool(getattr(cfg, "ml_feature_fracdiff_enabled", False)):
+        frac = fractionally_differentiate(
+            r,
+            order=float(getattr(cfg, "ml_feature_fracdiff_order", 0.4)),
+            threshold=float(getattr(cfg, "ml_feature_fracdiff_threshold", 1e-5)),
+            max_terms=int(getattr(cfg, "ml_feature_fracdiff_max_terms", 256)),
+            fillna_value=0.0,
+        )
+        f["ret_fracdiff"] = frac.shift(1).fillna(0.0)
+
+    if cfg is not None and bool(getattr(cfg, "ml_feature_har_rv_enabled", False)):
+        har_windows = tuple(int(w) for w in getattr(cfg, "ml_feature_har_rv_windows", (1, 5, 22)))
+        har = build_har_rv_features(
+            r,
+            windows=har_windows,
+            shift_by=1,
+            use_log=bool(getattr(cfg, "ml_feature_har_rv_use_log", True)),
+        )
+        f = f.join(har, how="left")
 
     return f.replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
@@ -193,8 +220,8 @@ def apply_hmm_softprob_rf_strategy(
         trans_sticky=float(cfg.hmm_trans_sticky),
     )
 
-    x_train = build_rf_feature_matrix(tr, train_probs)
-    x_test = build_rf_feature_matrix(te, test_probs)
+    x_train = build_rf_feature_matrix(tr, train_probs, cfg=cfg)
+    x_test = build_rf_feature_matrix(te, test_probs, cfg=cfg)
 
     y_train = (tr.shift(-1) > 0.0).astype(int)
     x_train = x_train.iloc[:-1]
@@ -209,7 +236,7 @@ def apply_hmm_softprob_rf_strategy(
     )
     clf.fit(x_train, y_train)
 
-    p_train = clf.predict_proba(build_rf_feature_matrix(tr, train_probs))[:, 1]
+    p_train = clf.predict_proba(build_rf_feature_matrix(tr, train_probs, cfg=cfg))[:, 1]
     p_test = clf.predict_proba(x_test)[:, 1]
 
     threshold = float(cfg.ml_prob_threshold)
@@ -257,6 +284,8 @@ def apply_hmm_softprob_rf_strategy(
         "cost_aware_rebalance": float(1.0 if bool(getattr(cfg, "cost_aware_rebalance", False)) else 0.0),
         "cost_aware_rebalance_multiplier": float(getattr(cfg, "cost_aware_rebalance_multiplier", 1.0)),
         "cost_aware_alpha_lookback": float(getattr(cfg, "cost_aware_alpha_lookback", 20)),
+        "ml_feature_fracdiff_enabled": float(1.0 if bool(getattr(cfg, "ml_feature_fracdiff_enabled", False)) else 0.0),
+        "ml_feature_har_rv_enabled": float(1.0 if bool(getattr(cfg, "ml_feature_har_rv_enabled", False)) else 0.0),
     }
     diag.update({f"gate_{k}": float(v) for k, v in gate_diag.items()})
 
